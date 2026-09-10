@@ -25,13 +25,32 @@ def calculate_portfolio_metrics(
     daily_returns: pd.Series,
     initial_capital: float,
     invested: pd.Series | None = None,
+    position_changes: pd.Series | None = None,
+    risk_free_rate: float = 0.0,
 ) -> dict[str, float]:
-    """Calculate common performance metrics for one portfolio history."""
+    """Calculate annualized performance and risk metrics for one portfolio history.
+
+    Sharpe ratio uses a 0% annual risk-free rate by default. Position changes
+    should contain one value for each day, with a value of 1 when the position
+    changed and 0 otherwise.
+    """
+    if len(dates) < 2:
+        raise ValueError("At least two daily observations are needed for metrics.")
+    if initial_capital <= 0:
+        raise ValueError("Initial capital must be greater than zero.")
+    if risk_free_rate < 0:
+        raise ValueError("Risk-free rate cannot be negative.")
+
     years = (dates.iloc[-1] - dates.iloc[0]).days / 365.25
     total_return = portfolio_values.iloc[-1] / initial_capital - 1
     cagr = (portfolio_values.iloc[-1] / initial_capital) ** (1 / years) - 1
     volatility = daily_returns.std() * 252**0.5
-    sharpe_ratio = daily_returns.mean() / daily_returns.std() * 252**0.5
+    daily_risk_free_rate = (1 + risk_free_rate) ** (1 / 252) - 1
+    sharpe_ratio = (
+        (daily_returns.mean() - daily_risk_free_rate)
+        / daily_returns.std()
+        * 252**0.5
+    )
     running_peak = portfolio_values.cummax()
     maximum_drawdown = (portfolio_values / running_peak - 1).min()
 
@@ -44,6 +63,8 @@ def calculate_portfolio_metrics(
     }
     if invested is not None:
         metrics["percentage_invested"] = float(invested.mean())
+    if position_changes is not None:
+        metrics["number_of_position_changes"] = float(position_changes.sum())
     return metrics
 
 
@@ -108,6 +129,7 @@ def run_moving_average_backtest(
         history["Strategy return"],
         initial_capital,
         history["Invested"],
+        history["Position change"],
     )
     buy_and_hold_metrics = calculate_portfolio_metrics(
         history["Date"],

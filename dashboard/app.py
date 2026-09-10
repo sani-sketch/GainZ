@@ -47,6 +47,7 @@ def load_price_data(symbol: str) -> pd.DataFrame:
     return prices
 
 
+@st.cache_data(show_spinner=False)
 def make_price_chart(prices: pd.DataFrame, symbol: str):
     """Create an interactive Plotly line chart for one symbol."""
     line_color = "#d85b43" if symbol == "AAPL" else "#1f6f78"
@@ -69,6 +70,7 @@ def make_price_chart(prices: pd.DataFrame, symbol: str):
     )
 
 
+@st.cache_data(show_spinner=False)
 def make_cumulative_return_chart(aapl: pd.DataFrame, spy: pd.DataFrame):
     """Create a chart comparing growth from the same starting value."""
     combined = aapl.merge(spy, on="Date", suffixes=("_AAPL", "_SPY"))
@@ -101,6 +103,7 @@ def make_cumulative_return_chart(aapl: pd.DataFrame, spy: pd.DataFrame):
     )
 
 
+@st.cache_data(show_spinner=False)
 def make_moving_average_chart(aapl: pd.DataFrame):
     """Create an AAPL price chart with 50-day and 200-day averages."""
     prices = aapl.copy()
@@ -139,6 +142,7 @@ def make_moving_average_chart(aapl: pd.DataFrame):
     )
 
 
+@st.cache_data(show_spinner=False)
 def make_backtest_chart(result: BacktestResult):
     """Create a chart comparing the strategy with buy-and-hold AAPL."""
     chart_data = result.history[
@@ -169,6 +173,7 @@ def make_backtest_chart(result: BacktestResult):
     )
 
 
+@st.cache_data(show_spinner=False)
 def make_equity_curve_chart(
     result: BacktestResult,
     aapl_buy_and_hold: pd.DataFrame,
@@ -210,6 +215,7 @@ def make_equity_curve_chart(
     )
 
 
+@st.cache_data(show_spinner=False)
 def make_drawdown_chart(result: BacktestResult):
     """Create a chart showing the strategy's falls from previous peaks."""
     chart = px.line(
@@ -579,18 +585,26 @@ def main() -> None:
     st.caption("This status is for education and research only. It is not a buy or sell recommendation.")
 
     initial_capital = 10_000.0
-    backtest = run_cached_backtest(aapl, initial_capital)
+    aligned_prices = aapl.merge(spy, on="Date", suffixes=("_AAPL", "_SPY"))
+    aligned_aapl = aligned_prices[["Date", "Close_AAPL"]].rename(
+        columns={"Close_AAPL": "Close"}
+    )
+    aligned_spy = aligned_prices[["Date", "Close_SPY"]].rename(
+        columns={"Close_SPY": "Close"}
+    )
+    backtest = run_cached_backtest(aligned_aapl, initial_capital)
     aapl_buy_and_hold = make_buy_and_hold_history(
-        aapl, initial_capital, "AAPL Buy & Hold"
+        aligned_aapl, initial_capital, "AAPL Buy & Hold"
     )
     spy_buy_and_hold = make_buy_and_hold_history(
-        spy, initial_capital, "SPY Buy & Hold"
+        aligned_spy, initial_capital, "SPY Buy & Hold"
     )
     spy_metrics = calculate_portfolio_metrics(
         spy_buy_and_hold["Date"],
         spy_buy_and_hold["SPY Buy & Hold"],
         spy_buy_and_hold["Daily return"],
         initial_capital,
+        invested=pd.Series(1, index=spy_buy_and_hold.index),
     )
     show_heading(
         "Backtest",
@@ -614,6 +628,7 @@ def main() -> None:
                 f"{strategy_metrics['sharpe_ratio']:.2f}",
                 f"{strategy_metrics['maximum_drawdown']:.1%}",
                 f"{strategy_metrics['percentage_invested']:.1%}",
+                f"{strategy_metrics['number_of_position_changes']:.0f}",
             ],
             "AAPL Buy & Hold": [
                 f"{aapl_metrics['cagr']:.1%}",
@@ -621,6 +636,7 @@ def main() -> None:
                 f"{aapl_metrics['sharpe_ratio']:.2f}",
                 f"{aapl_metrics['maximum_drawdown']:.1%}",
                 "100.0%",
+                "0",
             ],
             "SPY Buy & Hold": [
                 f"{spy_metrics['cagr']:.1%}",
@@ -628,6 +644,7 @@ def main() -> None:
                 f"{spy_metrics['sharpe_ratio']:.2f}",
                 f"{spy_metrics['maximum_drawdown']:.1%}",
                 "100.0%",
+                "0",
             ],
         },
         index=[
@@ -636,6 +653,7 @@ def main() -> None:
             "Sharpe ratio (0% risk-free rate)",
             "Maximum drawdown",
             "Trading days invested",
+            "Number of position changes",
         ],
     )
     st.dataframe(comparison_table, width="stretch")

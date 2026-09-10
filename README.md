@@ -2,7 +2,7 @@
 
 GainZ Alpha is a beginner-friendly quantitative trading research platform for learning, developing, and backtesting systematic investment strategies.
 
-GainZ Alpha V0.1 is a research and educational project. It does **not** currently trade real money.
+GainZ Alpha V0.2 is a research and educational project. It does **not** currently trade real money.
 
 ## Overview
 
@@ -27,6 +27,8 @@ GainZ Alpha downloads daily historical prices, calculates simple market indicato
 - Buy-and-hold comparison
 - Maximum drawdown
 - Basic protection against look-ahead bias by shifting signals by one trading day
+
+V0.2 evaluates the GainZ Alpha strategy, AAPL buy-and-hold, and SPY buy-and-hold using CAGR, annualized volatility, Sharpe ratio, maximum drawdown, percentage of trading days invested, and position changes. The initial Sharpe ratio uses a 0% risk-free rate. All three portfolios start at $10,000 and use dates shared by the AAPL and SPY datasets.
 
 ## Current Strategy
 
@@ -110,14 +112,6 @@ pytest
 ## Planned Development
 
 Future work will remain incremental and research-focused:
-
-### V0.2
-
-- Better performance metrics
-- CAGR
-- Volatility
-- Sharpe ratio
-- Improved benchmark comparison
 
 ### V0.3
 
