@@ -1,0 +1,23 @@
+[project]
+name = "GainZ Alpha"
+base_currency = "GBP"
+frequency = "daily"
+
+[universe]
+# Research examples only. Availability for UK retail investing is a separate decision.
+symbols = ["AAPL", "MSFT", "NVDA", "SPY"]
+benchmark = "SPY"
+market = "US"
+
+[data]
+raw_directory = "data/raw"
+processed_directory = "data/processed"
+start_date = "2015-01-01"
+
+[backtest]
+initial_capital = 10000.0
+commission_bps = 0.0
+slippage_bps = 0.0
+
+[risk]
+max_position_weight = 0.25

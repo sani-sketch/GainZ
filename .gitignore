@@ -1,0 +1,33 @@
+# Python caches and local tooling
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Virtual environments
+.venv/
+venv/
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+
+# Research outputs and downloaded market data
+data/*.csv
+data/raw/*
+data/processed/*
+!data/.gitkeep
+!data/raw/.gitkeep
+!data/processed/.gitkeep
+outputs/*
+!outputs/.gitkeep
+
+# Editors and operating systems
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
