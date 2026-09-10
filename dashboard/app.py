@@ -23,6 +23,18 @@ from backtesting.moving_average_backtest import (
     make_buy_and_hold_history,
     run_moving_average_backtest,
 )
+from backtesting.multi_stock_backtest import (
+    MOMENTUM_STRATEGY,
+    TREND_MOMENTUM_STRATEGY,
+    TREND_STRATEGY,
+    run_multi_stock_research,
+)
+from config.settings import load_settings
+
+
+SETTINGS = load_settings()
+RESEARCH_TICKERS = SETTINGS["universe"]["symbols"]
+BENCHMARK = SETTINGS["universe"]["benchmark"]
 
 
 @st.cache_data(show_spinner=False)
@@ -104,14 +116,15 @@ def make_cumulative_return_chart(aapl: pd.DataFrame, spy: pd.DataFrame):
 
 
 @st.cache_data(show_spinner=False)
-def make_moving_average_chart(aapl: pd.DataFrame):
-    """Create an AAPL price chart with 50-day and 200-day averages."""
-    prices = aapl.copy()
+def make_moving_average_chart(prices: pd.DataFrame, symbol: str = "AAPL"):
+    """Create a price chart with 50-day and 200-day averages."""
+    prices = prices.copy()
     prices["50-day average"] = prices["Close"].rolling(window=50).mean()
     prices["200-day average"] = prices["Close"].rolling(window=200).mean()
-    chart_data = prices.rename(columns={"Close": "AAPL price"}).melt(
+    price_label = f"{symbol} price"
+    chart_data = prices.rename(columns={"Close": price_label}).melt(
         id_vars="Date",
-        value_vars=["AAPL price", "50-day average", "200-day average"],
+        value_vars=[price_label, "50-day average", "200-day average"],
         var_name="Series",
         value_name="Price",
     )
@@ -121,10 +134,10 @@ def make_moving_average_chart(aapl: pd.DataFrame):
         x="Date",
         y="Price",
         color="Series",
-        title="AAPL price with moving averages",
+        title=f"{symbol} price with moving averages",
         labels={"Date": "Date", "Price": "Price (USD)", "Series": ""},
         color_discrete_map={
-            "AAPL price": "#e8eef0",
+            price_label: "#e8eef0",
             "50-day average": "#d85b43",
             "200-day average": "#1f6f78",
         },
@@ -143,8 +156,8 @@ def make_moving_average_chart(aapl: pd.DataFrame):
 
 
 @st.cache_data(show_spinner=False)
-def make_backtest_chart(result: BacktestResult):
-    """Create a chart comparing the strategy with buy-and-hold AAPL."""
+def make_backtest_chart(result: BacktestResult, symbol: str = "AAPL"):
+    """Create a chart comparing the strategy with buy-and-hold for one symbol."""
     chart_data = result.history[
         ["Date", "Strategy portfolio", "Buy and hold portfolio"]
     ].melt(id_vars="Date", var_name="Portfolio", value_name="Value")
@@ -153,7 +166,7 @@ def make_backtest_chart(result: BacktestResult):
         x="Date",
         y="Value",
         color="Portfolio",
-        title="Backtest portfolio value",
+        title=f"{symbol} backtest portfolio value",
         labels={"Date": "Date", "Value": "Portfolio value (USD)", "Portfolio": ""},
         color_discrete_map={
             "Strategy portfolio": "#d85b43",
@@ -216,13 +229,13 @@ def make_equity_curve_chart(
 
 
 @st.cache_data(show_spinner=False)
-def make_drawdown_chart(result: BacktestResult):
-    """Create a chart showing the strategy's falls from previous peaks."""
+def make_drawdown_chart(result: BacktestResult, symbol: str = "AAPL"):
+    """Create a chart showing a strategy's falls from previous peaks."""
     chart = px.line(
         result.history,
         x="Date",
         y="Strategy drawdown",
-        title="GainZ Alpha strategy drawdown",
+        title=f"{symbol} GainZ Alpha strategy drawdown",
         labels={"Date": "Date", "Strategy drawdown": "Drawdown"},
         render_mode="svg",
     )
@@ -386,6 +399,20 @@ def run_cached_backtest(prices: pd.DataFrame, initial_capital: float) -> Backtes
     return run_moving_average_backtest(prices, initial_capital=initial_capital)
 
 
+@st.cache_data(show_spinner=False)
+def run_cached_multi_stock_research(
+    price_data: dict[str, pd.DataFrame],
+    initial_capital: float,
+    strategy: str,
+):
+    """Cache one independent multi-stock strategy run."""
+    return run_multi_stock_research(
+        price_data,
+        initial_capital=initial_capital,
+        strategy=strategy,
+    )
+
+
 def main() -> None:
     """Build the dashboard page."""
     st.set_page_config(page_title="GainZ Alpha", page_icon="📈", layout="wide")
@@ -403,6 +430,7 @@ def main() -> None:
             [Historical prices](#historical-prices)  
             [AAPL moving averages](#aapl-moving-averages)  
             [Backtest](#backtest)  
+            [Multi-Stock Research](#multi-stock-research)
             [Cumulative comparison](#cumulative-comparison)
             """
         )
@@ -667,6 +695,192 @@ def main() -> None:
     )
     st.plotly_chart(make_drawdown_chart(backtest), width="stretch")
     st.caption("Educational research only. This backtest is not a prediction or a buy/sell recommendation.")
+
+    show_heading(
+        "Multi-Stock Research",
+        "This applies one selected long-only research strategy independently to each configured ticker over the shared date window available in the downloaded files. These are research statistics, not evidence that a strategy works.",
+    )
+    st.caption(
+        "The research sample is a diversified set of stocks selected for comparison only. "
+        "SPY remains the market benchmark in the legacy dashboard sections."
+    )
+    research_prices: dict[str, pd.DataFrame] = {}
+    research_load_errors: dict[str, str] = {}
+    for ticker in RESEARCH_TICKERS:
+        try:
+            research_prices[ticker] = load_price_data(ticker)
+        except Exception as error:
+            research_load_errors[ticker] = str(error)
+
+    research = run_multi_stock_research(research_prices, initial_capital)
+    if research_load_errors:
+        st.warning(
+            "Some research tickers were unavailable and were skipped: "
+            + ", ".join(sorted(research_load_errors))
+            + ". Run data/download_prices.py to download or update the universe."
+        )
+    strategy_choice = st.selectbox(
+        "Strategy",
+        options=[TREND_STRATEGY, MOMENTUM_STRATEGY, TREND_MOMENTUM_STRATEGY],
+        help="Run either the existing 50/200 trend rule or the independent 12-month momentum rule.",
+    )
+    research_runs = {
+        strategy: run_cached_multi_stock_research(
+            research_prices,
+            initial_capital,
+            strategy,
+        )
+        for strategy in [TREND_STRATEGY, MOMENTUM_STRATEGY, TREND_MOMENTUM_STRATEGY]
+    }
+    research = research_runs[strategy_choice]
+    if research.skipped:
+        st.caption("Skipped ticker details: " + "; ".join(
+            f"{ticker}: {reason}" for ticker, reason in research.skipped.items()
+        ))
+
+    metrics = research.metrics
+    if metrics.empty:
+        st.info("No research ticker has enough valid daily data for this strategy yet.")
+    else:
+        strategy_cagr_beats = metrics["Strategy CAGR"] > metrics["Buy & Hold CAGR"]
+        strategy_sharpe_beats = metrics["Strategy Sharpe"] > metrics["Buy & Hold Sharpe"]
+        summary_columns = st.columns(7)
+        summary_columns[0].metric("Stocks tested", f"{len(metrics)}")
+        summary_columns[1].metric("Strategy CAGR beat", f"{strategy_cagr_beats.sum()}")
+        summary_columns[2].metric("Beat percentage", f"{strategy_cagr_beats.mean():.1%}")
+        summary_columns[3].metric("Strategy Sharpe beat", f"{strategy_sharpe_beats.sum()}")
+        summary_columns[4].metric("Average strategy CAGR", f"{metrics['Strategy CAGR'].mean():.1%}")
+        summary_columns[5].metric("Average buy & hold CAGR", f"{metrics['Buy & Hold CAGR'].mean():.1%}")
+        summary_columns[6].metric("Average excess CAGR", f"{metrics['Excess CAGR'].mean():+.1%}")
+
+        table_columns = [
+            "Ticker",
+            "Strategy CAGR",
+            "Buy & Hold CAGR",
+            "Excess CAGR",
+            "Strategy Sharpe",
+            "Buy & Hold Sharpe",
+            "Strategy Max DD",
+            "Buy & Hold Max DD",
+            "Time Invested",
+            "Position Changes",
+        ]
+        percentage_columns = {
+            column: "{:.1%}"
+            for column in table_columns
+            if column not in {"Ticker", "Strategy Sharpe", "Buy & Hold Sharpe", "Position Changes"}
+        }
+        st.dataframe(
+            metrics[table_columns].style.format(percentage_columns).format(
+                {"Strategy Sharpe": "{:.2f}", "Buy & Hold Sharpe": "{:.2f}", "Position Changes": "{:.0f}"}
+            ),
+            width="stretch",
+            hide_index=True,
+        )
+
+        show_heading(
+            "Strategy Comparison",
+            "This compares the two independent strategies across the stocks that completed each backtest. The strategies are not combined or optimized.",
+        )
+        comparison_rows = []
+        for strategy, strategy_result in research_runs.items():
+            strategy_metrics = strategy_result.metrics
+            if strategy_metrics.empty:
+                continue
+            comparison_rows.append(
+                {
+                    "Strategy": strategy,
+                    "Average CAGR": strategy_metrics["Strategy CAGR"].mean(),
+                    "Average Excess CAGR": strategy_metrics["Excess CAGR"].mean(),
+                    "Average Sharpe": strategy_metrics["Strategy Sharpe"].mean(),
+                    "Average Max Drawdown": strategy_metrics["Strategy Max DD"].mean(),
+                    "CAGR beats Buy & Hold": (
+                        strategy_metrics["Strategy CAGR"] > strategy_metrics["Buy & Hold CAGR"]
+                    ).mean(),
+                    "Sharpe beats Buy & Hold": (
+                        strategy_metrics["Strategy Sharpe"] > strategy_metrics["Buy & Hold Sharpe"]
+                    ).mean(),
+                    "Average Time Invested": strategy_metrics["Time Invested"].mean(),
+                }
+            )
+        st.dataframe(
+            pd.DataFrame(comparison_rows).style.format(
+                {
+                    "Average CAGR": "{:.1%}",
+                    "Average Excess CAGR": "{:+.1%}",
+                    "Average Sharpe": "{:.2f}",
+                    "Average Max Drawdown": "{:.1%}",
+                    "CAGR beats Buy & Hold": "{:.1%}",
+                    "Sharpe beats Buy & Hold": "{:.1%}",
+                    "Average Time Invested": "{:.1%}",
+                }
+            ),
+            width="stretch",
+            hide_index=True,
+        )
+
+        selected_ticker = st.selectbox(
+            "Inspect a ticker",
+            options=list(metrics["Ticker"]),
+            help="Select one successfully tested ticker to inspect its price, equity, drawdown, and metrics.",
+        )
+        selected_result = research.backtests[selected_ticker]
+        selected_prices = selected_result.history[["Date", "Close"]]
+        st.plotly_chart(
+            make_moving_average_chart(selected_prices, selected_ticker),
+            width="stretch",
+            key="research-moving-average",
+        )
+        st.plotly_chart(
+            make_backtest_chart(selected_result, selected_ticker),
+            width="stretch",
+            key="research-equity-curve",
+        )
+        st.plotly_chart(
+            make_drawdown_chart(selected_result, selected_ticker),
+            width="stretch",
+            key="research-drawdown",
+        )
+        selected_strategy = selected_result.strategy_metrics
+        selected_buy_and_hold = selected_result.buy_and_hold_metrics
+        inspection_table = pd.DataFrame(
+            {
+                "Selected Strategy": selected_strategy,
+                "Buy & Hold": selected_buy_and_hold,
+            }
+        ).rename(
+            index={
+                "cagr": "CAGR",
+                "annualized_volatility": "Annualized volatility",
+                "sharpe_ratio": "Sharpe ratio",
+                "maximum_drawdown": "Maximum drawdown",
+                "percentage_invested": "Time invested",
+                "number_of_position_changes": "Position changes",
+            }
+        )
+        st.dataframe(
+            inspection_table.style.format(
+                {
+                    "Selected Strategy": "{:.1%}",
+                    "Buy & Hold": "{:.1%}",
+                },
+                subset=pd.IndexSlice[
+                    ["CAGR", "Annualized volatility", "Maximum drawdown", "Time invested"],
+                    :,
+                ],
+            ).format(
+                {"Selected Strategy": "{:.2f}", "Buy & Hold": "{:.2f}"},
+                subset=pd.IndexSlice[["Sharpe ratio"], :],
+            ).format(
+                {"Selected Strategy": "{:.0f}", "Buy & Hold": "{:.0f}"},
+                subset=pd.IndexSlice[["Position changes"], :],
+            ),
+            width="stretch",
+        )
+        st.caption(
+            f"{strategy_choice} research window: {research.start_date.date()} to {research.end_date.date()}. "
+            "Historical results are descriptive and do not establish future performance."
+        )
 
     show_heading(
         "Cumulative comparison",

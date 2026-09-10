@@ -2,7 +2,7 @@
 
 GainZ Alpha is a beginner-friendly quantitative trading research platform for learning, developing, and backtesting systematic investment strategies.
 
-GainZ Alpha V0.2 is a research and educational project. It does **not** currently trade real money.
+GainZ Alpha V0.3 is a research and educational project. It does **not** currently trade real money.
 
 ## Overview
 
@@ -11,7 +11,7 @@ GainZ Alpha downloads daily historical prices, calculates simple market indicato
 ## Current Features - V0.1
 
 - Historical daily market data
-- AAPL research
+- Multi-stock research universe: AAPL, MSFT, GOOGL, AMZN, NVDA, META, JPM, V, WMT, COST, XOM, JNJ, PG, HD, KO
 - SPY benchmark data
 - Streamlit dashboard
 - Interactive Plotly charts
@@ -28,11 +28,11 @@ GainZ Alpha downloads daily historical prices, calculates simple market indicato
 - Maximum drawdown
 - Basic protection against look-ahead bias by shifting signals by one trading day
 
-V0.2 evaluates the GainZ Alpha strategy, AAPL buy-and-hold, and SPY buy-and-hold using CAGR, annualized volatility, Sharpe ratio, maximum drawdown, percentage of trading days invested, and position changes. The initial Sharpe ratio uses a 0% risk-free rate. All three portfolios start at $10,000 and use dates shared by the AAPL and SPY datasets.
+V0.2 evaluates the GainZ Alpha strategy, AAPL buy-and-hold, and SPY buy-and-hold using CAGR, annualized volatility, Sharpe ratio, maximum drawdown, percentage of trading days invested, and position changes. V0.3 applies the unchanged strategy independently to the research universe, compares each result with buy-and-hold, and reports excess CAGR. The initial Sharpe ratio uses a 0% risk-free rate. Each comparison uses the shared date window available across successfully downloaded research files.
 
 ## Current Strategy
 
-The strategy compares two moving averages for AAPL:
+The strategy compares two moving averages for each selected stock:
 
 ```text
 50-day MA > 200-day MA -> Invested in AAPL
@@ -77,7 +77,7 @@ pip install -r requirements.txt
 
 ## Running GainZ Alpha
 
-Download the current AAPL and SPY data first:
+Download or update the current research universe and SPY benchmark first:
 
 ```powershell
 python data\download_prices.py
@@ -115,7 +115,7 @@ Future work will remain incremental and research-focused:
 
 ### V0.3
 
-- Multiple stocks
+- Multi-stock research comparison
 - Portfolio-level backtesting
 - Position sizing
 - Stronger risk management

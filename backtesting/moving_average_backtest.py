@@ -46,11 +46,15 @@ def calculate_portfolio_metrics(
     cagr = (portfolio_values.iloc[-1] / initial_capital) ** (1 / years) - 1
     volatility = daily_returns.std() * 252**0.5
     daily_risk_free_rate = (1 + risk_free_rate) ** (1 / 252) - 1
-    sharpe_ratio = (
-        (daily_returns.mean() - daily_risk_free_rate)
-        / daily_returns.std()
-        * 252**0.5
-    )
+    daily_volatility = daily_returns.std()
+    if daily_volatility == 0:
+        sharpe_ratio = 0.0
+    else:
+        sharpe_ratio = (
+            (daily_returns.mean() - daily_risk_free_rate)
+            / daily_volatility
+            * 252**0.5
+        )
     running_peak = portfolio_values.cummax()
     maximum_drawdown = (portfolio_values / running_peak - 1).min()
 

@@ -1,13 +1,24 @@
 """Download daily historical prices for the first GainZ Alpha universe."""
 
 from pathlib import Path
+import sys
 
 import yfinance as yf
 
-
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from config.settings import load_settings
+
+
 DATA_DIRECTORY = PROJECT_ROOT / "data"
-SYMBOLS = ["AAPL", "SPY"]
+settings = load_settings()
+SYMBOLS = (
+    settings["universe"]["symbols"]
+    + settings["universe"]["broad_symbols"]
+    + [settings["universe"]["benchmark"]]
+)
 
 
 def download_symbol_data(symbol: str) -> None:
@@ -38,11 +49,19 @@ def download_symbol_data(symbol: str) -> None:
 
 
 def main() -> None:
-    """Download data for each symbol in the small starter universe."""
+    """Download data for every research ticker, continuing after failures."""
     DATA_DIRECTORY.mkdir(exist_ok=True)
 
-    for symbol in SYMBOLS:
-        download_symbol_data(symbol)
+    failed_symbols: dict[str, str] = {}
+    for symbol in dict.fromkeys(SYMBOLS):
+        try:
+            download_symbol_data(symbol)
+        except Exception as error:
+            failed_symbols[symbol] = str(error)
+            print(f"Could not download {symbol}: {error}")
+
+    if failed_symbols:
+        print(f"Completed with {len(failed_symbols)} failed download(s).")
 
 
 if __name__ == "__main__":
