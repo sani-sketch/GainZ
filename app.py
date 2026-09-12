@@ -46,6 +46,12 @@ def get_positions():
 
 
 @st.cache_data(ttl=60)
+def get_raw_positions():
+    broker = Trading212Broker(environment="demo")
+    return broker.raw_positions()
+
+
+@st.cache_data(ttl=60)
 def get_pending_orders():
     broker = Trading212Broker(environment="demo")
     return broker.orders()
@@ -73,7 +79,9 @@ def load_report():
 
     try:
         return json.loads(
-            REPORT_PATH.read_text(encoding="utf-8")
+            REPORT_PATH.read_text(
+                encoding="utf-8"
+            )
         )
     except Exception:
         return None
@@ -181,12 +189,14 @@ st.info(
 broker_error = None
 account = {}
 positions = []
+raw_positions = []
 pending_orders = []
 
 if not preview_mode:
     try:
         account = get_account_summary()
         positions = get_positions()
+        raw_positions = get_raw_positions()
         pending_orders = get_pending_orders()
 
     except Exception as exc:
@@ -264,22 +274,43 @@ if preview_mode:
     positions = [
         PreviewPosition(
             "AMD",
-            0.56,
-            175.30,
-            98.17,
+            1.50,
+            190.00,
+            285.00,
         ),
         PreviewPosition(
             "MU",
-            0.29,
-            146.20,
-            42.40,
+            2.00,
+            145.00,
+            290.00,
         ),
         PreviewPosition(
             "CRM",
-            1.17,
-            245.50,
-            287.24,
+            1.10,
+            265.00,
+            291.50,
         ),
+    ]
+
+    raw_positions = [
+        {
+            "ticker": "AMD_US_EQ",
+            "quantity": 1.50,
+            "averagePrice": 175.00,
+            "currentPrice": 190.00,
+        },
+        {
+            "ticker": "MU_US_EQ",
+            "quantity": 2.00,
+            "averagePrice": 150.00,
+            "currentPrice": 145.00,
+        },
+        {
+            "ticker": "CRM_US_EQ",
+            "quantity": 1.10,
+            "averagePrice": 250.00,
+            "currentPrice": 265.00,
+        },
     ]
 
     pending_orders = [
@@ -397,7 +428,10 @@ st.subheader("Today")
 
 if broker_error and not preview_mode:
 
-    if "TooManyRequests" in broker_error or "429" in broker_error:
+    if (
+        "TooManyRequests" in broker_error
+        or "429" in broker_error
+    ):
         st.warning(
             "Trading 212 is temporarily rate-limiting requests. "
             "Wait a minute, then press Refresh once."
@@ -459,6 +493,149 @@ else:
 
     st.write(
         f"**Today's action:** {action_text}"
+    )
+
+
+# ============================================================
+# PROFIT / LOSS
+# ============================================================
+
+st.divider()
+
+st.subheader("Performance")
+
+performance_rows = []
+
+total_cost = 0.0
+total_value = 0.0
+
+for p in raw_positions:
+
+    ticker = str(
+        p.get(
+            "ticker",
+            "",
+        )
+    ).split("_")[0]
+
+    quantity = float(
+        p.get(
+            "quantity",
+            0,
+        )
+        or 0
+    )
+
+    average_price = float(
+        p.get(
+            "averagePrice",
+            0,
+        )
+        or 0
+    )
+
+    current_price = float(
+        p.get(
+            "currentPrice",
+            0,
+        )
+        or 0
+    )
+
+    cost = (
+        quantity
+        * average_price
+    )
+
+    value = (
+        quantity
+        * current_price
+    )
+
+    profit = (
+        value
+        - cost
+    )
+
+    return_pct = (
+        (profit / cost) * 100
+        if cost
+        else 0
+    )
+
+    total_cost += cost
+    total_value += value
+
+    performance_rows.append(
+        {
+            "Ticker": ticker,
+            "Invested": round(
+                cost,
+                2,
+            ),
+            "Current Value": round(
+                value,
+                2,
+            ),
+            "P/L": round(
+                profit,
+                2,
+            ),
+            "Return %": round(
+                return_pct,
+                2,
+            ),
+        }
+    )
+
+
+total_profit = (
+    total_value
+    - total_cost
+)
+
+total_return = (
+    (total_profit / total_cost) * 100
+    if total_cost
+    else 0
+)
+
+
+p1, p2, p3 = st.columns(3)
+
+p1.metric(
+    "Invested Capital",
+    f"£{total_cost:,.2f}",
+)
+
+p2.metric(
+    "Current Value",
+    f"£{total_value:,.2f}",
+)
+
+p3.metric(
+    "Profit / Loss",
+    f"£{total_profit:,.2f}",
+    f"{total_return:.2f}%",
+)
+
+
+if performance_rows:
+
+    performance_df = pd.DataFrame(
+        performance_rows
+    )
+
+    st.dataframe(
+        performance_df,
+        use_container_width=True,
+        hide_index=True,
+    )
+
+else:
+
+    st.info(
+        "No open positions yet, so there is no P/L to display."
     )
 
 
@@ -609,7 +786,9 @@ with st.expander(
         st.bar_chart(
             target_df.set_index(
                 "Ticker"
-            )["Target Weight %"]
+            )[
+                "Target Weight %"
+            ]
         )
 
     else:
@@ -673,6 +852,7 @@ st.divider()
 st.subheader("Controls")
 
 b1, b2, b3 = st.columns(3)
+
 
 with b1:
 

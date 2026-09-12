@@ -106,7 +106,6 @@ class Trading212Broker:
                 request,
                 timeout=20,
             ) as response:
-
                 body = response.read().decode()
 
                 if not body:
@@ -144,7 +143,6 @@ class Trading212Broker:
 
     def _instruments(self) -> dict[str, str]:
         if self._instrument_map is None:
-
             raw = self._request(
                 "GET",
                 "/equity/metadata/instruments",
@@ -159,7 +157,6 @@ class Trading212Broker:
             mapping = {}
 
             for item in items or []:
-
                 ticker = str(
                     item.get(
                         "ticker",
@@ -187,7 +184,6 @@ class Trading212Broker:
         self,
         symbol: str,
     ) -> str:
-
         symbol = symbol.upper()
 
         try:
@@ -204,7 +200,6 @@ class Trading212Broker:
     # =========================================================
 
     def positions(self) -> list[Position]:
-
         raw = self._request(
             "GET",
             "/equity/positions",
@@ -219,7 +214,6 @@ class Trading212Broker:
         output = []
 
         for position in items or []:
-
             ticker = str(
                 position.get(
                     "ticker",
@@ -263,24 +257,35 @@ class Trading212Broker:
 
         return output
 
+    def raw_positions(self) -> list[dict]:
+        raw = self._request(
+            "GET",
+            "/equity/positions",
+        )
+
+        if isinstance(raw, dict):
+            return raw.get(
+                "items",
+                [],
+            )
+
+        return raw or []
+
     # =========================================================
     # PENDING / ACTIVE ORDERS
     # =========================================================
 
     def orders(self) -> list[dict]:
-
         raw = self._request(
             "GET",
             "/equity/orders",
         )
 
         if isinstance(raw, dict):
-            items = raw.get(
+            return raw.get(
                 "items",
                 [],
-            )
-
-            return items or []
+            ) or []
 
         return raw or []
 
@@ -293,7 +298,6 @@ class Trading212Broker:
         symbol: str,
         quantity: float,
     ) -> OrderResult:
-
         ticker = self.broker_ticker(
             symbol
         )
@@ -305,8 +309,8 @@ class Trading212Broker:
         # Trading 212 may require different quantity
         # precision depending on the instrument.
         #
-        # In DEMO mode only, GainZ retries using
-        # progressively lower decimal precision.
+        # In DEMO mode only, retry progressively lower
+        # decimal precision on precision-specific errors.
         precisions = [
             4,
             3,
@@ -318,7 +322,6 @@ class Trading212Broker:
         last_error = None
 
         for precision in precisions:
-
             rounded_quantity = round(
                 original_quantity,
                 precision,
@@ -360,19 +363,15 @@ class Trading212Broker:
                 )
 
             except Trading212Error as exc:
-
                 last_error = exc
                 error_text = str(exc)
 
-                # Only retry precision-related failures.
                 if (
                     "quantity-precision-mismatch"
                     not in error_text
                 ):
                     raise
 
-                # Never use auto-retry precision logic
-                # for real-money execution.
                 if self.environment != "demo":
                     raise
 
