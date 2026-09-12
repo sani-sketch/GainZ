@@ -30,6 +30,28 @@ st.set_page_config(
 
 
 # ============================================================
+# CACHED BROKER READS
+# ============================================================
+
+@st.cache_data(ttl=60)
+def get_account_summary():
+    broker = Trading212Broker(environment="demo")
+    return broker.account_summary()
+
+
+@st.cache_data(ttl=60)
+def get_positions():
+    broker = Trading212Broker(environment="demo")
+    return broker.positions()
+
+
+@st.cache_data(ttl=60)
+def get_pending_orders():
+    broker = Trading212Broker(environment="demo")
+    return broker.orders()
+
+
+# ============================================================
 # HELPERS
 # ============================================================
 
@@ -163,13 +185,9 @@ pending_orders = []
 
 if not preview_mode:
     try:
-        broker = Trading212Broker(
-            environment="demo"
-        )
-
-        account = broker.account_summary()
-        positions = broker.positions()
-        pending_orders = broker.orders()
+        account = get_account_summary()
+        positions = get_positions()
+        pending_orders = get_pending_orders()
 
     except Exception as exc:
         broker_error = str(exc)
@@ -276,6 +294,10 @@ if preview_mode:
     ]
 
 
+# ============================================================
+# EXTRACT REPORT VALUES
+# ============================================================
+
 decision = report.get(
     "decision",
     {},
@@ -375,9 +397,15 @@ st.subheader("Today")
 
 if broker_error and not preview_mode:
 
-    st.error(
-        f"GainZ cannot connect to Trading 212: {broker_error}"
-    )
+    if "TooManyRequests" in broker_error or "429" in broker_error:
+        st.warning(
+            "Trading 212 is temporarily rate-limiting requests. "
+            "Wait a minute, then press Refresh once."
+        )
+    else:
+        st.error(
+            f"GainZ cannot connect to Trading 212: {broker_error}"
+        )
 
 else:
 
@@ -652,6 +680,7 @@ with b1:
         "🔄 Refresh",
         use_container_width=True,
     ):
+        st.cache_data.clear()
         st.rerun()
 
 
@@ -672,6 +701,8 @@ with b2:
             result = run_gainz(
                 execute_demo=False
             )
+
+        st.cache_data.clear()
 
         if result["success"]:
             st.success(
@@ -710,6 +741,8 @@ with b3:
             result = run_gainz(
                 execute_demo=True
             )
+
+        st.cache_data.clear()
 
         if result["success"]:
             st.success(
@@ -806,5 +839,6 @@ st.divider()
 st.caption(
     "GainZ • Practice trading only • "
     "Preview mode is simulated • "
+    "Broker data is cached for 60 seconds • "
     "Historical performance does not guarantee future returns."
 )
