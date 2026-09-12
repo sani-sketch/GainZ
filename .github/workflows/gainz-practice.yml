@@ -120,7 +120,8 @@ jobs:
 
           notify(
               "✅ GainZ automation completed successfully.\n"
-              "Check the dashboard for current Practice positions and orders."
+              "Check the dashboard for current Practice positions and orders.\n"
+              "Dashboard: https://gainz-dashboard.onrender.com/"
           )
           PY
 
