@@ -1,0 +1,111 @@
+name: GainZ Practice Automation
+
+on:
+  workflow_dispatch:
+
+  schedule:
+    # 09:40 New York during daylight-saving time
+    - cron: "40 13 * * 1-5"
+
+    # 09:40 New York during standard time
+    - cron: "40 14 * * 1-5"
+
+permissions:
+  contents: read
+
+jobs:
+  gainz-practice:
+    runs-on: ubuntu-latest
+
+    env:
+      TRADING212_API_KEY: ${{ secrets.TRADING212_API_KEY }}
+      TRADING212_API_SECRET: ${{ secrets.TRADING212_API_SECRET }}
+
+    steps:
+      - name: Checkout GainZ
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Check market and correct time
+        id: market_check
+        run: |
+          python - <<'PY'
+          import os
+          from datetime import datetime
+          from zoneinfo import ZoneInfo
+          import pandas_market_calendars as mcal
+
+          now = datetime.now(ZoneInfo("America/New_York"))
+
+          nyse = mcal.get_calendar("NYSE")
+          schedule = nyse.schedule(
+              start_date=now.date(),
+              end_date=now.date()
+          )
+
+          market_day = not schedule.empty
+
+          correct_time = (
+              now.hour == 9
+              and 35 <= now.minute <= 59
+          )
+
+          should_run = market_day and correct_time
+
+          print("New York time:", now)
+          print("NYSE trading day:", market_day)
+          print("Correct execution window:", correct_time)
+          print("Should execute:", should_run)
+
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write(
+                  f"should_run={'true' if should_run else 'false'}\n"
+              )
+          PY
+
+      - name: Check pending Practice orders
+        if: steps.market_check.outputs.should_run == 'true'
+        id: pending_check
+        run: |
+          python - <<'PY'
+          import os
+          from broker.trading212 import Trading212Broker
+
+          broker = Trading212Broker(environment="demo")
+          orders = broker.orders()
+
+          print(f"Pending orders: {len(orders)}")
+
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write(
+                  f"can_trade={'true' if len(orders) == 0 else 'false'}\n"
+              )
+          PY
+
+      - name: Execute GainZ Practice orders
+        if: >
+          steps.market_check.outputs.should_run == 'true' &&
+          steps.pending_check.outputs.can_trade == 'true'
+        run: |
+          python run_trading212.py --execute-demo
+
+      - name: Skip because pending orders exist
+        if: >
+          steps.market_check.outputs.should_run == 'true' &&
+          steps.pending_check.outputs.can_trade != 'true'
+        run: |
+          echo "GainZ skipped because pending Practice orders already exist."
+
+      - name: Skip because market is closed or wrong time slot
+        if: steps.market_check.outputs.should_run != 'true'
+        run: |
+          echo "GainZ skipped. Not the correct New York execution window or NYSE is closed."
