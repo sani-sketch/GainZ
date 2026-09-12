@@ -44,14 +44,18 @@ jobs:
           import os
           from datetime import datetime
           from zoneinfo import ZoneInfo
+
           import pandas_market_calendars as mcal
 
-          now = datetime.now(ZoneInfo("America/New_York"))
+          now = datetime.now(
+              ZoneInfo("America/New_York")
+          )
 
           nyse = mcal.get_calendar("NYSE")
+
           schedule = nyse.schedule(
               start_date=now.date(),
-              end_date=now.date()
+              end_date=now.date(),
           )
 
           market_day = not schedule.empty
@@ -61,16 +65,63 @@ jobs:
               and 35 <= now.minute <= 59
           )
 
-          should_run = market_day and correct_time
+          should_run = (
+              market_day
+              and correct_time
+          )
 
-          print("New York time:", now)
-          print("NYSE trading day:", market_day)
-          print("Correct execution window:", correct_time)
-          print("Should execute:", should_run)
+          print(
+              "New York time:",
+              now,
+          )
 
-          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+          print(
+              "NYSE trading day:",
+              market_day,
+          )
+
+          print(
+              "Correct execution window:",
+              correct_time,
+          )
+
+          print(
+              "Should execute:",
+              should_run,
+          )
+
+          with open(
+              os.environ["GITHUB_OUTPUT"],
+              "a",
+          ) as f:
               f.write(
-                  f"should_run={'true' if should_run else 'false'}\n"
+                  "market_day="
+                  + (
+                      "true"
+                      if market_day
+                      else "false"
+                  )
+                  + "\n"
+              )
+
+              f.write(
+                  "correct_time="
+                  + (
+                      "true"
+                      if correct_time
+                      else "false"
+                  )
+                  + "\n"
+              )
+
+              f.write(
+                  "should_run="
+                  + (
+                      "true"
+                      if should_run
+                      else "false"
+                  )
+                  + "\n"
               )
           PY
 
@@ -80,16 +131,39 @@ jobs:
         run: |
           python - <<'PY'
           import os
+
           from broker.trading212 import Trading212Broker
 
-          broker = Trading212Broker(environment="demo")
+          broker = Trading212Broker(
+              environment="demo"
+          )
+
           orders = broker.orders()
 
-          print(f"Pending orders: {len(orders)}")
+          pending_count = len(orders)
 
-          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+          print(
+              f"Pending orders: {pending_count}"
+          )
+
+          with open(
+              os.environ["GITHUB_OUTPUT"],
+              "a",
+          ) as f:
               f.write(
-                  f"can_trade={'true' if len(orders) == 0 else 'false'}\n"
+                  "pending_count="
+                  + str(pending_count)
+                  + "\n"
+              )
+
+              f.write(
+                  "can_trade="
+                  + (
+                      "true"
+                      if pending_count == 0
+                      else "false"
+                  )
+                  + "\n"
               )
           PY
 
@@ -97,6 +171,7 @@ jobs:
         if: >
           steps.market_check.outputs.should_run == 'true' &&
           steps.pending_check.outputs.can_trade == 'true'
+        id: execute_gainz
         run: |
           python run_trading212.py --execute-demo
 
@@ -110,18 +185,55 @@ jobs:
       - name: Skip because market is closed or wrong time slot
         if: steps.market_check.outputs.should_run != 'true'
         run: |
-          echo "GainZ skipped. Not the correct New York execution window or NYSE is closed."
+          echo "GainZ skipped because NYSE is closed or this is not the correct trading window."
 
-      - name: Send success notification
-        if: success()
+      - name: Send executed notification
+        if: >
+          success() &&
+          steps.market_check.outputs.should_run == 'true' &&
+          steps.pending_check.outputs.can_trade == 'true'
         run: |
           python - <<'PY'
-          from notifications import notify
+          from notifications import notify_success
 
-          notify(
-              "✅ GainZ automation completed successfully.\n"
-              "Check the dashboard for current Practice positions and orders.\n"
-              "Dashboard: https://gainz-dashboard.onrender.com/"
+          notify_success(
+              dashboard_url="https://gainz-dashboard.onrender.com/",
+              mode="GAINZ",
+          )
+          PY
+
+      - name: Send pending-orders skipped notification
+        if: >
+          success() &&
+          steps.market_check.outputs.should_run == 'true' &&
+          steps.pending_check.outputs.can_trade != 'true'
+        run: |
+          python - <<'PY'
+          from notifications import notify_skipped
+
+          notify_skipped(
+              dashboard_url="https://gainz-dashboard.onrender.com/",
+              reason=(
+                  "Pending Practice orders already exist, "
+                  "so GainZ did not submit duplicate orders."
+              ),
+          )
+          PY
+
+      - name: Send market-closed skipped notification
+        if: >
+          success() &&
+          steps.market_check.outputs.should_run != 'true'
+        run: |
+          python - <<'PY'
+          from notifications import notify_skipped
+
+          notify_skipped(
+              dashboard_url="https://gainz-dashboard.onrender.com/",
+              reason=(
+                  "NYSE is closed or this is not the "
+                  "scheduled trading window."
+              ),
           )
           PY
 
@@ -129,10 +241,13 @@ jobs:
         if: failure()
         run: |
           python - <<'PY'
-          from notifications import notify
+          from notifications import notify_failure
 
-          notify(
-              "❌ GainZ automation failed.\n"
-              "Open GitHub Actions and check the latest GainZ Practice Automation run."
+          notify_failure(
+              dashboard_url="https://gainz-dashboard.onrender.com/",
+              error_message=(
+                  "GainZ automation failed. "
+                  "Open GitHub Actions for the full logs."
+              ),
           )
           PY
