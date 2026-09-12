@@ -97,7 +97,7 @@ def friendly_strategy(name):
 
     return mapping.get(
         name,
-        name or "Unknown"
+        name or "Unknown",
     )
 
 
@@ -108,8 +108,24 @@ def friendly_risk(name):
 
     return mapping.get(
         name,
-        name or "Unknown"
+        name or "Unknown",
     )
+
+
+# ============================================================
+# SIDEBAR
+# ============================================================
+
+st.sidebar.title("GainZ")
+
+preview_mode = st.sidebar.checkbox(
+    "Preview dashboard with sample data",
+    value=False,
+)
+
+st.sidebar.caption(
+    "Preview mode is for UI testing only."
+)
 
 
 # ============================================================
@@ -122,9 +138,14 @@ st.caption(
     "Automated Practice Trading"
 )
 
-st.success(
-    "🟢 System running in Practice mode"
-)
+if preview_mode:
+    st.warning(
+        "🧪 Preview mode is ON — showing sample data"
+    )
+else:
+    st.success(
+        "🟢 System running in Practice mode"
+    )
 
 st.info(
     "🔒 Real-money trading is locked"
@@ -140,17 +161,18 @@ account = {}
 positions = []
 pending_orders = []
 
-try:
-    broker = Trading212Broker(
-        environment="demo"
-    )
+if not preview_mode:
+    try:
+        broker = Trading212Broker(
+            environment="demo"
+        )
 
-    account = broker.account_summary()
-    positions = broker.positions()
-    pending_orders = broker.orders()
+        account = broker.account_summary()
+        positions = broker.positions()
+        pending_orders = broker.orders()
 
-except Exception as exc:
-    broker_error = str(exc)
+    except Exception as exc:
+        broker_error = str(exc)
 
 
 # ============================================================
@@ -159,19 +181,114 @@ except Exception as exc:
 
 report = load_report() or {}
 
+
+# ============================================================
+# PREVIEW SAMPLE DATA
+# ============================================================
+
+if preview_mode:
+
+    report = {
+        "environment": "demo",
+        "executed": True,
+        "cash_available": 5000.00,
+        "decision": {
+            "mode": "GAINZ",
+            "variant": "N15_momentum_trend_none",
+            "risk": "vol12_defensive",
+            "exposure": 0.88,
+            "gainz_sharpe": 2.21,
+            "benchmark_sharpe": 1.27,
+        },
+        "target_weights": {
+            "AMD": 0.0587,
+            "MU": 0.0587,
+            "PANW": 0.0587,
+            "FTNT": 0.0587,
+            "CRM": 0.0587,
+            "BAC": 0.0587,
+        },
+        "orders": [
+            {
+                "symbol": "AMD",
+                "quantity": 0.56,
+                "status": "FILLED",
+                "message": "BUY £287.57",
+            },
+            {
+                "symbol": "MU",
+                "quantity": 0.29,
+                "status": "FILLED",
+                "message": "BUY £287.57",
+            },
+            {
+                "symbol": "PANW",
+                "quantity": 0.84,
+                "status": "PENDING",
+                "message": "BUY £287.57",
+            },
+        ],
+    }
+
+    class PreviewPosition:
+        def __init__(
+            self,
+            symbol,
+            quantity,
+            price,
+            value,
+        ):
+            self.symbol = symbol
+            self.quantity = quantity
+            self.price = price
+            self.value = value
+
+    positions = [
+        PreviewPosition(
+            "AMD",
+            0.56,
+            175.30,
+            98.17,
+        ),
+        PreviewPosition(
+            "MU",
+            0.29,
+            146.20,
+            42.40,
+        ),
+        PreviewPosition(
+            "CRM",
+            1.17,
+            245.50,
+            287.24,
+        ),
+    ]
+
+    pending_orders = [
+        {
+            "ticker": "PANW_US_EQ",
+            "side": "BUY",
+            "quantity": 0.84,
+            "filledQuantity": 0,
+            "status": "NEW",
+            "createdAt": "Preview",
+        }
+    ]
+
+
 decision = report.get(
     "decision",
-    {}
+    {},
 )
 
 weights = report.get(
     "target_weights",
-    {}
+    {},
 )
 
 execution_orders = report.get(
     "orders",
-    []
+    [],
 )
 
 cash_available = float(
@@ -202,19 +319,25 @@ exposure = float(
 # SYSTEM HEALTH
 # ============================================================
 
-if broker_error:
+if preview_mode:
+    health = "PREVIEW"
+    health_icon = "🧪"
+
+elif broker_error:
     health = "ERROR"
     health_icon = "🔴"
+
 elif pending_orders:
     health = "PENDING"
     health_icon = "🟡"
+
 else:
     health = "HEALTHY"
     health_icon = "🟢"
 
 
 # ============================================================
-# MAIN SUMMARY CARDS
+# OVERVIEW
 # ============================================================
 
 st.subheader("Overview")
@@ -223,22 +346,22 @@ c1, c2, c3, c4 = st.columns(4)
 
 c1.metric(
     "System",
-    f"{health_icon} {health}"
+    f"{health_icon} {health}",
 )
 
 c2.metric(
     "Cash",
-    f"£{cash_available:,.2f}"
+    f"£{cash_available:,.2f}",
 )
 
 c3.metric(
     "Invested",
-    f"{exposure * 100:.0f}%"
+    f"{exposure * 100:.0f}%",
 )
 
 c4.metric(
     "Open Positions",
-    len(positions)
+    len(positions),
 )
 
 
@@ -250,7 +373,7 @@ st.divider()
 
 st.subheader("Today")
 
-if broker_error:
+if broker_error and not preview_mode:
 
     st.error(
         f"GainZ cannot connect to Trading 212: {broker_error}"
@@ -260,7 +383,7 @@ else:
 
     mode = decision.get(
         "mode",
-        "N/A"
+        "N/A",
     )
 
     strategy = friendly_strategy(
@@ -271,27 +394,38 @@ else:
         decision.get("risk")
     )
 
-    if executed:
-        action_text = "Practice orders were submitted."
+    if preview_mode:
+        action_text = (
+            "Preview mode is showing sample portfolio data."
+        )
+
+    elif executed:
+        action_text = (
+            "Practice orders were submitted."
+        )
+
     elif report:
         action_text = (
             "A new plan was generated. "
             "No orders were submitted."
         )
+
     else:
         action_text = (
             "No GainZ plan has been generated yet."
         )
 
-    st.write(
+    t1, t2, t3 = st.columns(3)
+
+    t1.write(
         f"**Mode:** {mode}"
     )
 
-    st.write(
+    t2.write(
         f"**Strategy:** {strategy}"
     )
 
-    st.write(
+    t3.write(
         f"**Risk mode:** {risk_mode}"
     )
 
@@ -301,7 +435,7 @@ else:
 
 
 # ============================================================
-# ORDER STATUS SUMMARY
+# ORDER STATUS
 # ============================================================
 
 st.divider()
@@ -325,7 +459,7 @@ rejected_count = len(
         if str(
             order.get(
                 "status",
-                ""
+                "",
             )
         ).upper()
         in {
@@ -338,17 +472,17 @@ rejected_count = len(
 
 o1.metric(
     "Pending",
-    pending_count
+    pending_count,
 )
 
 o2.metric(
     "Open Positions",
-    filled_count
+    filled_count,
 )
 
 o3.metric(
     "Rejected",
-    rejected_count
+    rejected_count,
 )
 
 
@@ -368,7 +502,7 @@ if positions:
 
         target_weight = weights.get(
             p.symbol,
-            0
+            0,
         )
 
         position_rows.append(
@@ -376,19 +510,19 @@ if positions:
                 "Ticker": p.symbol,
                 "Quantity": round(
                     p.quantity,
-                    4
+                    4,
                 ),
                 "Price": round(
                     p.price,
-                    2
+                    2,
                 ),
                 "Value": round(
                     p.value,
-                    2
+                    2,
                 ),
                 "Target %": round(
                     target_weight * 100,
-                    1
+                    1,
                 ),
                 "Status": "Held",
             }
@@ -427,11 +561,10 @@ with st.expander(
             target_rows.append(
                 {
                     "Ticker": ticker,
-                    "Target Weight %":
-                        round(
-                            float(weight) * 100,
-                            2
-                        ),
+                    "Target Weight %": round(
+                        float(weight) * 100,
+                        2,
+                    ),
                 }
             )
 
@@ -527,7 +660,10 @@ with b2:
     if st.button(
         "🧠 Generate Plan",
         use_container_width=True,
-        disabled=not credentials_present(),
+        disabled=(
+            preview_mode
+            or not credentials_present()
+        ),
     ):
 
         with st.spinner(
@@ -552,7 +688,8 @@ with b2:
 with b3:
 
     confirm = st.checkbox(
-        "I confirm this is Practice money"
+        "I confirm this is Practice money",
+        disabled=preview_mode,
     )
 
     if st.button(
@@ -560,7 +697,8 @@ with b3:
         use_container_width=True,
         type="primary",
         disabled=(
-            not credentials_present()
+            preview_mode
+            or not credentials_present()
             or not confirm
             or pending_count > 0
         ),
@@ -585,7 +723,13 @@ with b3:
             )
 
 
-if pending_count > 0:
+if preview_mode:
+
+    st.info(
+        "Preview mode disables trading controls."
+    )
+
+elif pending_count > 0:
 
     st.warning(
         "Execution is disabled while pending orders exist."
@@ -603,7 +747,10 @@ with st.expander(
 ):
 
     st.write(
-        "**Environment:** Practice / Demo"
+        "**Environment:**",
+        "Preview"
+        if preview_mode
+        else "Practice / Demo",
     )
 
     st.write(
@@ -614,7 +761,7 @@ with st.expander(
         "**Credentials:**",
         "Configured"
         if credentials_present()
-        else "Missing"
+        else "Missing",
     )
 
     if decision:
@@ -624,10 +771,10 @@ with st.expander(
             round(
                 decision.get(
                     "gainz_sharpe",
-                    0
+                    0,
                 ),
-                2
-            )
+                2,
+            ),
         )
 
         st.write(
@@ -635,10 +782,10 @@ with st.expander(
             round(
                 decision.get(
                     "benchmark_sharpe",
-                    0
+                    0,
                 ),
-                2
-            )
+                2,
+            ),
         )
 
     st.write(
@@ -658,5 +805,6 @@ st.divider()
 
 st.caption(
     "GainZ • Practice trading only • "
+    "Preview mode is simulated • "
     "Historical performance does not guarantee future returns."
 )
