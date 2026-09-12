@@ -20,6 +20,8 @@ jobs:
     env:
       TRADING212_API_KEY: ${{ secrets.TRADING212_API_KEY }}
       TRADING212_API_SECRET: ${{ secrets.TRADING212_API_SECRET }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
 
     steps:
       - name: Checkout GainZ
@@ -109,3 +111,27 @@ jobs:
         if: steps.market_check.outputs.should_run != 'true'
         run: |
           echo "GainZ skipped. Not the correct New York execution window or NYSE is closed."
+
+      - name: Send success notification
+        if: success()
+        run: |
+          python - <<'PY'
+          from notifications import notify
+
+          notify(
+              "✅ GainZ automation completed successfully.\n"
+              "Check the dashboard for current Practice positions and orders."
+          )
+          PY
+
+      - name: Send failure notification
+        if: failure()
+        run: |
+          python - <<'PY'
+          from notifications import notify
+
+          notify(
+              "❌ GainZ automation failed.\n"
+              "Open GitHub Actions and check the latest GainZ Practice Automation run."
+          )
+          PY
