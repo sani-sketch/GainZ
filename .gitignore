@@ -31,3 +31,6 @@ outputs/*
 .idea/
 .DS_Store
 Thumbs.db
+
+# Streamlit specific
+.streamlit/secrets.toml
