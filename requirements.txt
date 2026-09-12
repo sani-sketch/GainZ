@@ -1,0 +1,9 @@
+pandas
+yfinance
+streamlit
+plotly
+pytest
+apscheduler
+pandas-market-calendars
+python-dotenv
+streamlit

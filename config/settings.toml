@@ -1,0 +1,36 @@
+[project]
+name = "GainZ Alpha"
+base_currency = "GBP"
+frequency = "daily"
+
+[universe]
+# Research examples only. Availability for UK retail investing is a separate decision.
+symbols = ["AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "JPM", "V", "WMT", "COST", "XOM", "JNJ", "PG", "HD", "KO"]
+benchmark = "SPY"
+market = "US"
+# A broad, sector-diversified large/liquid research sample. These are current
+# constituents, not a point-in-time historical universe.
+broad_symbols = [
+	"AAPL", "MSFT", "GOOGL", "AMZN", "META", "NVDA", "AVGO", "ORCL", "CRM", "ADBE", "AMD", "CSCO", "INTC", "QCOM", "TXN", "AMAT", "MU", "LRCX", "ADI", "KLAC", "IBM", "NOW", "INTU", "PANW", "SNPS", "CDNS", "MCHP", "FTNT",
+	"JPM", "BAC", "WFC", "C", "GS", "MS", "USB", "PNC", "TFC", "COF", "STT", "BLK", "SCHW", "AXP", "SPGI", "ICE", "CME", "CB",
+	"LLY", "UNH", "JNJ", "ABBV", "MRK", "PFE", "TMO", "ABT", "DHR", "BMY", "AMGN", "GILD", "CVS", "CI", "ISRG", "MDT", "SYK", "BSX",
+	"WMT", "COST", "HD", "LOW", "TJX", "NKE", "MCD", "SBUX", "BKNG", "MAR", "GM", "F",
+	"PG", "KO", "PEP", "PM", "MO", "CL", "KMB", "MDLZ",
+	"CAT", "DE", "HON", "UPS", "UNP", "RTX", "LMT", "GE", "ETN", "EMR", "ITW", "ADP", "FDX", "CSX",
+	"XOM", "CVX", "COP", "SLB", "EOG", "OXY", "MPC", "PSX", "NEE", "DUK", "SO", "AEP", "EXC", "LIN", "APD", "SHW",
+	"NFLX", "DIS", "CMCSA", "VZ", "T",
+	"AMT", "PLD", "CCI", "EQIX", "O", "DLR"
+]
+
+[data]
+raw_directory = "data/raw"
+processed_directory = "data/processed"
+start_date = "2015-01-01"
+
+[backtest]
+initial_capital = 10000.0
+commission_bps = 0.0
+slippage_bps = 0.0
+
+[risk]
+max_position_weight = 0.25
