@@ -54,7 +54,7 @@ def get_orders():
 
 
 # ============================================================
-# HELPERS
+# GENERAL HELPERS
 # ============================================================
 
 def credentials_present():
@@ -138,6 +138,13 @@ def friendly_risk(name):
     )
 
 
+def float_value(value, default=0.0):
+    try:
+        return float(value or 0)
+    except (TypeError, ValueError):
+        return default
+
+
 def is_rate_limit_error(error):
     if not error:
         return False
@@ -151,15 +158,15 @@ def is_rate_limit_error(error):
     )
 
 
-def float_value(value, default=0.0):
-    try:
-        return float(value or 0)
-    except (TypeError, ValueError):
-        return default
-
+# ============================================================
+# TICKER HELPERS
+# ============================================================
 
 def symbol_from_ticker(ticker):
-    ticker = str(ticker or "")
+    ticker = str(ticker or "").strip()
+
+    if not ticker:
+        return "Unknown"
 
     if "_" in ticker:
         return ticker.split("_")[0]
@@ -168,26 +175,95 @@ def symbol_from_ticker(ticker):
 
 
 def extract_position_symbol(position):
+    """
+    Trading 212 position format:
+
+    {
+        "instrument": {
+            "ticker": "PANW_US_EQ",
+            "name": "Palo Alto Networks",
+            "isin": "...",
+            "currency": "USD"
+        },
+        ...
+    }
+    """
+
+    if not isinstance(position, dict):
+        return "Unknown"
+
     instrument = position.get(
         "instrument",
-        {},
+        {}
     )
 
     if isinstance(instrument, dict):
 
-        value = (
-            instrument.get("ticker")
-            or instrument.get("symbol")
-            or instrument.get("name")
-            or instrument.get("shortName")
+        ticker = instrument.get(
+            "ticker"
         )
 
-        if value:
+        if ticker:
             return symbol_from_ticker(
-                value
+                ticker
             )
 
+        symbol = instrument.get(
+            "symbol"
+        )
+
+        if symbol:
+            return symbol_from_ticker(
+                symbol
+            )
+
+        name = instrument.get(
+            "name"
+        )
+
+        if name:
+            return str(name)
+
+    if isinstance(instrument, str):
+        return symbol_from_ticker(
+            instrument
+        )
+
     return "Unknown"
+
+
+def extract_position_name(position):
+    instrument = position.get(
+        "instrument",
+        {}
+    )
+
+    if isinstance(instrument, dict):
+        return str(
+            instrument.get(
+                "name",
+                ""
+            )
+        )
+
+    return ""
+
+
+def extract_position_currency(position):
+    instrument = position.get(
+        "instrument",
+        {}
+    )
+
+    if isinstance(instrument, dict):
+        return str(
+            instrument.get(
+                "currency",
+                ""
+            )
+        )
+
+    return ""
 
 
 # ============================================================
@@ -363,6 +439,7 @@ def fetch_with_fallback(
         return value, None
 
     except Exception as exc:
+
         previous_value = st.session_state.get(
             cache_key
         )
@@ -506,9 +583,9 @@ if preview_mode:
             "benchmark_sharpe": 1.27,
         },
         "target_weights": {
+            "PANW": 0.0587,
             "AMD": 0.0587,
             "MU": 0.0587,
-            "CRM": 0.0587,
         },
     }
 
@@ -519,32 +596,36 @@ if preview_mode:
     raw_positions = [
         {
             "instrument": {
-                "ticker": "AMD_US_EQ",
+                "ticker": "PANW_US_EQ",
+                "name": "Palo Alto Networks",
+                "currency": "USD",
             },
             "quantity": 0.8398,
-            "currentPrice": 373.55,
-            "averagePricePaid": 350.11,
+            "currentPrice": 374.00,
+            "averagePricePaid": 350.10716837,
             "walletImpact": {
                 "currency": "GBP",
                 "totalCost": 218.19,
-                "currentValue": 232.25,
-                "unrealizedProfitLoss": 14.06,
+                "currentValue": 232.53,
+                "unrealizedProfitLoss": 14.34,
                 "fxImpact": -0.52,
             },
         },
         {
             "instrument": {
-                "ticker": "MU_US_EQ",
+                "ticker": "AMD_US_EQ",
+                "name": "Advanced Micro Devices",
+                "currency": "USD",
             },
-            "quantity": 1.25,
-            "currentPrice": 145.20,
-            "averagePricePaid": 147.80,
+            "quantity": 1.20,
+            "currentPrice": 160.00,
+            "averagePricePaid": 155.00,
             "walletImpact": {
                 "currency": "GBP",
-                "totalCost": 137.50,
-                "currentValue": 135.10,
-                "unrealizedProfitLoss": -2.40,
-                "fxImpact": 0.15,
+                "totalCost": 140.00,
+                "currentValue": 144.50,
+                "unrealizedProfitLoss": 4.50,
+                "fxImpact": -0.10,
             },
         },
     ]
@@ -612,11 +693,14 @@ pending_count = len(
 # ============================================================
 
 if total_account_value > 0:
+
     exposure = (
         investment_value
         / total_account_value
     )
+
 else:
+
     exposure = 0.0
 
 
@@ -667,7 +751,7 @@ else:
 
 
 # ============================================================
-# RATE LIMIT MESSAGE
+# RATE LIMIT WARNING
 # ============================================================
 
 if rate_limited:
@@ -842,7 +926,7 @@ p4.metric(
 
 
 # ============================================================
-# PER-POSITION PERFORMANCE
+# PERFORMANCE TABLE
 # ============================================================
 
 performance_rows = []
@@ -850,6 +934,14 @@ performance_rows = []
 for position in raw_positions:
 
     ticker = extract_position_symbol(
+        position
+    )
+
+    company_name = extract_position_name(
+        position
+    )
+
+    stock_currency = extract_position_currency(
         position
     )
 
@@ -888,13 +980,13 @@ for position in raw_positions:
         )
     )
 
-    unrealized_position_ppl = float_value(
+    position_ppl_gbp = float_value(
         wallet.get(
             "unrealizedProfitLoss"
         )
     )
 
-    fx_impact = float_value(
+    fx_impact_gbp = float_value(
         wallet.get(
             "fxImpact"
         )
@@ -902,7 +994,7 @@ for position in raw_positions:
 
     return_pct = (
         (
-            unrealized_position_ppl
+            position_ppl_gbp
             / total_cost_gbp
         )
         * 100
@@ -913,6 +1005,8 @@ for position in raw_positions:
     performance_rows.append(
         {
             "Ticker": ticker,
+            "Company": company_name,
+            "Currency": stock_currency,
             "Quantity": round(
                 quantity,
                 4,
@@ -934,11 +1028,11 @@ for position in raw_positions:
                 2,
             ),
             "P/L (£)": round(
-                unrealized_position_ppl,
+                position_ppl_gbp,
                 2,
             ),
             "FX (£)": round(
-                fx_impact,
+                fx_impact_gbp,
                 2,
             ),
             "Return %": round(
@@ -969,9 +1063,8 @@ else:
 
 
 st.caption(
-    "Account and position values are shown in GBP using "
-    "Trading 212 walletImpact data. US stock prices may "
-    "still be quoted in USD."
+    "GBP cost, value and P/L come directly from Trading 212 "
+    "walletImpact data. US stock prices are quoted in USD."
 )
 
 
@@ -1038,6 +1131,10 @@ if raw_positions:
             position
         )
 
+        company_name = extract_position_name(
+            position
+        )
+
         quantity = float_value(
             position.get(
                 "quantity"
@@ -1083,6 +1180,7 @@ if raw_positions:
         portfolio_rows.append(
             {
                 "Ticker": ticker,
+                "Company": company_name,
                 "Quantity": round(
                     quantity,
                     4,
@@ -1209,6 +1307,7 @@ with st.expander(
         ]
 
         if existing_columns:
+
             orders_df = orders_df[
                 existing_columns
             ]
