@@ -168,7 +168,7 @@ def float_value(value, default=0.0):
 
 
 # ============================================================
-# EXACT TRADING 212 ACCOUNT MAPPING
+# TRADING 212 ACCOUNT MAPPING
 # ============================================================
 
 def extract_currency(account):
@@ -323,7 +323,7 @@ def extract_total_ppl(account):
 
 
 # ============================================================
-# SAFE FETCH WITH LAST-GOOD FALLBACK
+# SAFE FETCH
 # ============================================================
 
 def fetch_with_fallback(
@@ -383,7 +383,7 @@ if preview_mode:
     )
 else:
     st.success(
-        "🟢 System running in Practice mode"
+        "🟢 Connected to Trading 212 Practice"
     )
 
 st.info(
@@ -392,7 +392,7 @@ st.info(
 
 
 # ============================================================
-# LOAD LOCAL STRATEGY REPORT
+# LOAD STRATEGY REPORT
 # ============================================================
 
 report = load_report()
@@ -405,11 +405,6 @@ decision = report.get(
 weights = report.get(
     "target_weights",
     {},
-)
-
-execution_orders = report.get(
-    "orders",
-    [],
 )
 
 executed = bool(
@@ -463,7 +458,6 @@ broker_orders = broker_orders or []
 if preview_mode:
 
     account = {
-        "id": 12345678,
         "currency": "GBP",
         "totalValue": 4997.08,
         "cash": {
@@ -480,23 +474,18 @@ if preview_mode:
     }
 
     report = {
-        "environment": "demo",
         "executed": True,
         "decision": {
             "mode": "GAINZ",
             "variant": "N15_momentum_trend_none",
             "risk": "vol12_defensive",
-            "exposure": 0.88,
             "gainz_sharpe": 2.21,
             "benchmark_sharpe": 1.27,
         },
         "target_weights": {
             "AMD": 0.0587,
             "MU": 0.0587,
-            "PANW": 0.0587,
-            "FTNT": 0.0587,
             "CRM": 0.0587,
-            "BAC": 0.0587,
         },
     }
 
@@ -507,24 +496,29 @@ if preview_mode:
     raw_positions = [
         {
             "ticker": "AMD_US_EQ",
-            "quantity": 1.50,
-            "averagePrice": 175.00,
-            "currentPrice": 190.00,
-            "ppl": 22.50,
+            "quantity": 0.8398,
+            "currentPrice": 373.55,
+            "averagePricePaid": 350.11,
+            "walletImpact": {
+                "currency": "GBP",
+                "totalCost": 218.19,
+                "currentValue": 232.25,
+                "unrealizedProfitLoss": 14.06,
+                "fxImpact": -0.52,
+            },
         },
         {
             "ticker": "MU_US_EQ",
-            "quantity": 2.00,
-            "averagePrice": 150.00,
-            "currentPrice": 145.00,
-            "ppl": -10.00,
-        },
-        {
-            "ticker": "CRM_US_EQ",
-            "quantity": 1.10,
-            "averagePrice": 250.00,
-            "currentPrice": 265.00,
-            "ppl": 16.50,
+            "quantity": 1.25,
+            "currentPrice": 145.20,
+            "averagePricePaid": 147.80,
+            "walletImpact": {
+                "currency": "GBP",
+                "totalCost": 137.50,
+                "currentValue": 135.10,
+                "unrealizedProfitLoss": -2.40,
+                "fxImpact": 0.15,
+            },
         },
     ]
 
@@ -591,14 +585,11 @@ pending_count = len(
 # ============================================================
 
 if total_account_value > 0:
-
     exposure = (
         investment_value
         / total_account_value
     )
-
 else:
-
     exposure = 0.0
 
 
@@ -657,8 +648,7 @@ if rate_limited:
     st.warning(
         "Trading 212 temporarily rate-limited one or more "
         "dashboard requests. GainZ is showing the last "
-        "successfully loaded data where available. "
-        "Avoid repeatedly refreshing."
+        "successfully loaded data where available."
     )
 
 
@@ -692,7 +682,7 @@ c4.metric(
 
 
 # ============================================================
-# ACCOUNT SUMMARY
+# ACCOUNT
 # ============================================================
 
 st.divider()
@@ -846,49 +836,52 @@ for position in raw_positions:
 
     average_price = float_value(
         position.get(
-            "averagePrice"
+            "averagePricePaid"
         )
     )
 
     current_price = float_value(
         position.get(
-            "currentPrice",
-            average_price,
+            "currentPrice"
         )
     )
 
-    calculated_ppl = (
-        quantity
-        * (
-            current_price
-            - average_price
+    wallet = position.get(
+        "walletImpact",
+        {},
+    )
+
+    total_cost_gbp = float_value(
+        wallet.get(
+            "totalCost"
         )
     )
 
-    broker_ppl = position.get(
-        "ppl"
-    )
-
-    pnl = (
-        float_value(
-            broker_ppl
+    current_value_gbp = float_value(
+        wallet.get(
+            "currentValue"
         )
-        if broker_ppl is not None
-        else calculated_ppl
     )
 
-    cost = (
-        quantity
-        * average_price
+    unrealized_position_ppl = float_value(
+        wallet.get(
+            "unrealizedProfitLoss"
+        )
+    )
+
+    fx_impact = float_value(
+        wallet.get(
+            "fxImpact"
+        )
     )
 
     return_pct = (
         (
-            calculated_ppl
-            / cost
+            unrealized_position_ppl
+            / total_cost_gbp
         )
         * 100
-        if cost
+        if total_cost_gbp
         else 0
     )
 
@@ -907,8 +900,20 @@ for position in raw_positions:
                 current_price,
                 2,
             ),
-            "P/L": round(
-                pnl,
+            "Cost (£)": round(
+                total_cost_gbp,
+                2,
+            ),
+            "Value (£)": round(
+                current_value_gbp,
+                2,
+            ),
+            "P/L (£)": round(
+                unrealized_position_ppl,
+                2,
+            ),
+            "FX (£)": round(
+                fx_impact,
                 2,
             ),
             "Return %": round(
@@ -939,8 +944,9 @@ else:
 
 
 st.caption(
-    "Account-level values are shown in GBP from Trading 212. "
-    "Individual US-stock prices may be quoted in USD."
+    "Account and position values are shown in GBP using "
+    "Trading 212 walletImpact data. US stock prices may "
+    "still be quoted in USD."
 )
 
 
@@ -1017,14 +1023,30 @@ if raw_positions:
 
         average_price = float_value(
             position.get(
-                "averagePrice"
+                "averagePricePaid"
             )
         )
 
         current_price = float_value(
             position.get(
-                "currentPrice",
-                average_price,
+                "currentPrice"
+            )
+        )
+
+        wallet = position.get(
+            "walletImpact",
+            {},
+        )
+
+        current_value_gbp = float_value(
+            wallet.get(
+                "currentValue"
+            )
+        )
+
+        pnl_gbp = float_value(
+            wallet.get(
+                "unrealizedProfitLoss"
             )
         )
 
@@ -1048,6 +1070,14 @@ if raw_positions:
                 ),
                 "Current Price": round(
                     current_price,
+                    2,
+                ),
+                "Value (£)": round(
+                    current_value_gbp,
+                    2,
+                ),
+                "P/L (£)": round(
+                    pnl_gbp,
                     2,
                 ),
                 "Target %": round(
