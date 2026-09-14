@@ -28,11 +28,6 @@ st.set_page_config(
     layout="wide",
 )
 
-
-# ============================================================
-# CONSTANTS
-# ============================================================
-
 CACHE_TTL = 120
 
 
@@ -48,14 +43,6 @@ def get_account_summary():
 
 @st.cache_data(ttl=CACHE_TTL)
 def get_raw_positions():
-    """
-    One positions API call only.
-
-    We use this raw response for:
-    - open positions
-    - portfolio table
-    - profit/loss
-    """
     broker = Trading212Broker(environment="demo")
     return broker.raw_positions()
 
@@ -92,7 +79,6 @@ def load_report():
                 encoding="utf-8"
             )
         )
-
     except Exception:
         return {}
 
@@ -177,132 +163,173 @@ def symbol_from_ticker(ticker):
 def float_value(value, default=0.0):
     try:
         return float(value or 0)
-
     except (TypeError, ValueError):
         return default
 
 
 # ============================================================
-# ACCOUNT HELPERS
+# EXACT TRADING 212 ACCOUNT MAPPING
 # ============================================================
 
-def extract_cash(account):
-    """
-    Trading 212 account summary may contain nested cash data.
-    """
+def extract_currency(account):
+    if not isinstance(account, dict):
+        return "GBP"
 
+    return str(
+        account.get(
+            "currency",
+            "GBP",
+        )
+    )
+
+
+def extract_total_value(account):
     if not isinstance(account, dict):
         return 0.0
 
-    cash = account.get("cash", {})
+    return float_value(
+        account.get(
+            "totalValue",
+            0,
+        )
+    )
+
+
+def extract_cash(account):
+    if not isinstance(account, dict):
+        return 0.0
+
+    cash = account.get(
+        "cash",
+        {},
+    )
 
     if isinstance(cash, dict):
+        return float_value(
+            cash.get(
+                "availableToTrade",
+                0,
+            )
+        )
 
-        for key in (
-            "availableToTrade",
-            "free",
-            "total",
-            "cash",
-        ):
-            if key in cash:
-                return float_value(
-                    cash.get(key)
-                )
+    return 0.0
 
-    return float_value(cash)
+
+def extract_reserved_cash(account):
+    if not isinstance(account, dict):
+        return 0.0
+
+    cash = account.get(
+        "cash",
+        {},
+    )
+
+    if isinstance(cash, dict):
+        return float_value(
+            cash.get(
+                "reservedForOrders",
+                0,
+            )
+        )
+
+    return 0.0
 
 
 def extract_investment_value(account):
-    """
-    Try to get account-currency investment value from Trading 212.
-    """
-
     if not isinstance(account, dict):
-        return None
+        return 0.0
 
     investments = account.get(
         "investments",
-        {}
+        {},
     )
 
     if isinstance(investments, dict):
-
-        for key in (
-            "currentValue",
-            "value",
-            "marketValue",
-        ):
-            if key in investments:
-                return float_value(
-                    investments.get(key)
-                )
-
-    for key in (
-        "portfolioValue",
-        "investmentsValue",
-    ):
-        if key in account:
-            return float_value(
-                account.get(key)
+        return float_value(
+            investments.get(
+                "currentValue",
+                0,
             )
+        )
 
-    return None
+    return 0.0
 
 
-def extract_account_ppl(account):
-    """
-    Prefer broker-provided account P/L where available.
-    """
-
+def extract_total_cost(account):
     if not isinstance(account, dict):
-        return None
-
-    for key in (
-        "ppl",
-        "profitLoss",
-        "unrealizedPpl",
-    ):
-        if key in account:
-            return float_value(
-                account.get(key)
-            )
+        return 0.0
 
     investments = account.get(
         "investments",
-        {}
+        {},
     )
 
     if isinstance(investments, dict):
+        return float_value(
+            investments.get(
+                "totalCost",
+                0,
+            )
+        )
 
-        for key in (
-            "ppl",
-            "profitLoss",
-            "unrealizedPpl",
-        ):
-            if key in investments:
-                return float_value(
-                    investments.get(key)
-                )
+    return 0.0
 
-    return None
+
+def extract_realized_ppl(account):
+    if not isinstance(account, dict):
+        return 0.0
+
+    investments = account.get(
+        "investments",
+        {},
+    )
+
+    if isinstance(investments, dict):
+        return float_value(
+            investments.get(
+                "realizedProfitLoss",
+                0,
+            )
+        )
+
+    return 0.0
+
+
+def extract_unrealized_ppl(account):
+    if not isinstance(account, dict):
+        return 0.0
+
+    investments = account.get(
+        "investments",
+        {},
+    )
+
+    if isinstance(investments, dict):
+        return float_value(
+            investments.get(
+                "unrealizedProfitLoss",
+                0,
+            )
+        )
+
+    return 0.0
+
+
+def extract_total_ppl(account):
+    return (
+        extract_realized_ppl(account)
+        + extract_unrealized_ppl(account)
+    )
 
 
 # ============================================================
-# SAFE BROKER FETCH
+# SAFE FETCH WITH LAST-GOOD FALLBACK
 # ============================================================
 
 def fetch_with_fallback(
     cache_key,
     fetch_function,
 ):
-    """
-    Fetch broker data.
-
-    If Trading 212 temporarily rate-limits us,
-    retain the last successful response stored in the
-    user's Streamlit session.
-    """
-
     try:
         value = fetch_function()
 
@@ -313,12 +340,11 @@ def fetch_with_fallback(
         return value, None
 
     except Exception as exc:
-
-        old_value = st.session_state.get(
+        previous_value = st.session_state.get(
             cache_key
         )
 
-        return old_value, str(exc)
+        return previous_value, str(exc)
 
 
 # ============================================================
@@ -337,7 +363,7 @@ st.sidebar.caption(
 )
 
 st.sidebar.caption(
-    f"Broker data refreshes every {CACHE_TTL} seconds."
+    f"Broker data cached for {CACHE_TTL} seconds."
 )
 
 
@@ -352,15 +378,12 @@ st.caption(
 )
 
 if preview_mode:
-
     st.warning(
         "🧪 Preview mode is ON — showing sample data"
     )
-
 else:
-
     st.success(
-        "🟢 Connected to Trading 212 Practice"
+        "🟢 System running in Practice mode"
     )
 
 st.info(
@@ -369,7 +392,7 @@ st.info(
 
 
 # ============================================================
-# LOAD REPORT
+# LOAD LOCAL STRATEGY REPORT
 # ============================================================
 
 report = load_report()
@@ -398,7 +421,7 @@ executed = bool(
 
 
 # ============================================================
-# BROKER DATA
+# LOAD BROKER DATA
 # ============================================================
 
 account = {}
@@ -440,13 +463,20 @@ broker_orders = broker_orders or []
 if preview_mode:
 
     account = {
+        "id": 12345678,
+        "currency": "GBP",
+        "totalValue": 4997.08,
         "cash": {
-            "availableToTrade": 3500.00,
+            "availableToTrade": 1805.05,
+            "reservedForOrders": 0.0,
+            "inPies": 0.0,
         },
         "investments": {
-            "currentValue": 1500.00,
+            "currentValue": 3192.03,
+            "totalCost": 3190.16,
+            "realizedProfitLoss": 0.0,
+            "unrealizedProfitLoss": 1.87,
         },
-        "ppl": 72.50,
     }
 
     report = {
@@ -498,23 +528,32 @@ if preview_mode:
         },
     ]
 
-    broker_orders = [
-        {
-            "ticker": "PANW_US_EQ",
-            "side": "BUY",
-            "quantity": 0.84,
-            "filledQuantity": 0,
-            "status": "NEW",
-            "createdAt": "Preview",
-        }
-    ]
+    broker_orders = []
 
 
 # ============================================================
-# CALCULATED VALUES
+# ACCOUNT VALUES
 # ============================================================
+
+currency = extract_currency(
+    account
+)
+
+currency_symbol = (
+    "£"
+    if currency == "GBP"
+    else currency + " "
+)
+
+total_account_value = extract_total_value(
+    account
+)
 
 cash_available = extract_cash(
+    account
+)
+
+reserved_cash = extract_reserved_cash(
     account
 )
 
@@ -522,7 +561,19 @@ investment_value = extract_investment_value(
     account
 )
 
-account_ppl = extract_account_ppl(
+total_cost = extract_total_cost(
+    account
+)
+
+realized_ppl = extract_realized_ppl(
+    account
+)
+
+unrealized_ppl = extract_unrealized_ppl(
+    account
+)
+
+total_ppl = extract_total_ppl(
     account
 )
 
@@ -535,29 +586,20 @@ pending_count = len(
 )
 
 
-# Exposure in account currency, if broker provides both values.
+# ============================================================
+# EXPOSURE
+# ============================================================
 
-if (
-    investment_value is not None
-    and investment_value + cash_available > 0
-):
+if total_account_value > 0:
 
     exposure = (
         investment_value
-        / (
-            investment_value
-            + cash_available
-        )
+        / total_account_value
     )
 
 else:
 
-    exposure = float_value(
-        decision.get(
-            "exposure",
-            0,
-        )
-    )
+    exposure = 0.0
 
 
 # ============================================================
@@ -607,7 +649,7 @@ else:
 
 
 # ============================================================
-# RATE LIMIT WARNING
+# RATE LIMIT MESSAGE
 # ============================================================
 
 if rate_limited:
@@ -616,7 +658,7 @@ if rate_limited:
         "Trading 212 temporarily rate-limited one or more "
         "dashboard requests. GainZ is showing the last "
         "successfully loaded data where available. "
-        "You do not need to keep refreshing."
+        "Avoid repeatedly refreshing."
     )
 
 
@@ -635,17 +677,48 @@ c1.metric(
 
 c2.metric(
     "Cash",
-    f"£{cash_available:,.2f}",
+    f"{currency_symbol}{cash_available:,.2f}",
 )
 
 c3.metric(
     "Exposure",
-    f"{exposure * 100:.0f}%",
+    f"{exposure * 100:.1f}%",
 )
 
 c4.metric(
     "Open Positions",
     open_position_count,
+)
+
+
+# ============================================================
+# ACCOUNT SUMMARY
+# ============================================================
+
+st.divider()
+
+st.subheader("Account")
+
+a1, a2, a3, a4 = st.columns(4)
+
+a1.metric(
+    "Total Value",
+    f"{currency_symbol}{total_account_value:,.2f}",
+)
+
+a2.metric(
+    "Invested",
+    f"{currency_symbol}{investment_value:,.2f}",
+)
+
+a3.metric(
+    "Total Cost",
+    f"{currency_symbol}{total_cost:,.2f}",
+)
+
+a4.metric(
+    "Available Cash",
+    f"{currency_symbol}{cash_available:,.2f}",
 )
 
 
@@ -690,14 +763,14 @@ elif executed:
 elif report:
 
     action_text = (
-        "A GainZ plan has been generated."
+        "A GainZ strategy plan is available."
     )
 
 else:
 
     action_text = (
         "Broker data is live. "
-        "No local strategy report is available on this Render instance."
+        "No local strategy report is currently available on Render."
     )
 
 
@@ -728,12 +801,34 @@ st.divider()
 
 st.subheader("Performance")
 
+p1, p2, p3, p4 = st.columns(4)
+
+p1.metric(
+    "Unrealised P/L",
+    f"{currency_symbol}{unrealized_ppl:,.2f}",
+)
+
+p2.metric(
+    "Realised P/L",
+    f"{currency_symbol}{realized_ppl:,.2f}",
+)
+
+p3.metric(
+    "Total P/L",
+    f"{currency_symbol}{total_ppl:,.2f}",
+)
+
+p4.metric(
+    "Portfolio Value",
+    f"{currency_symbol}{investment_value:,.2f}",
+)
+
+
+# ============================================================
+# PER-POSITION PERFORMANCE
+# ============================================================
+
 performance_rows = []
-
-calculated_total_cost = 0.0
-calculated_total_value = 0.0
-calculated_total_ppl = 0.0
-
 
 for position in raw_positions:
 
@@ -762,45 +857,40 @@ for position in raw_positions:
         )
     )
 
+    calculated_ppl = (
+        quantity
+        * (
+            current_price
+            - average_price
+        )
+    )
+
+    broker_ppl = position.get(
+        "ppl"
+    )
+
+    pnl = (
+        float_value(
+            broker_ppl
+        )
+        if broker_ppl is not None
+        else calculated_ppl
+    )
+
     cost = (
         quantity
         * average_price
     )
 
-    current_value = (
-        quantity
-        * current_price
-    )
-
-    calculated_ppl = (
-        current_value
-        - cost
-    )
-
-    # Prefer broker P/L if Trading 212 supplies it.
-    broker_ppl = position.get(
-        "ppl"
-    )
-
-    if broker_ppl is not None:
-
-        pnl = float_value(
-            broker_ppl
-        )
-
-    else:
-
-        pnl = calculated_ppl
-
     return_pct = (
-        (calculated_ppl / cost) * 100
+        (
+            calculated_ppl
+            / cost
+        )
+        * 100
         if cost
         else 0
     )
-
-    calculated_total_cost += cost
-    calculated_total_value += current_value
-    calculated_total_ppl += pnl
 
     performance_rows.append(
         {
@@ -829,42 +919,6 @@ for position in raw_positions:
     )
 
 
-# Prefer broker-level account P/L if provided.
-display_ppl = (
-    account_ppl
-    if account_ppl is not None
-    else calculated_total_ppl
-)
-
-
-p1, p2, p3 = st.columns(3)
-
-p1.metric(
-    "Open Positions",
-    open_position_count,
-)
-
-if investment_value is not None:
-
-    p2.metric(
-        "Portfolio Value",
-        f"£{investment_value:,.2f}",
-    )
-
-else:
-
-    p2.metric(
-        "Portfolio",
-        "Connected",
-    )
-
-
-p3.metric(
-    "P/L",
-    f"£{display_ppl:,.2f}",
-)
-
-
 if performance_rows:
 
     performance_df = pd.DataFrame(
@@ -885,9 +939,8 @@ else:
 
 
 st.caption(
-    "Portfolio-level £ values use Trading 212 account data "
-    "where available. Individual US-stock prices may be "
-    "quoted in the instrument's trading currency."
+    "Account-level values are shown in GBP from Trading 212. "
+    "Individual US-stock prices may be quoted in USD."
 )
 
 
@@ -898,7 +951,6 @@ st.caption(
 st.divider()
 
 st.subheader("Orders")
-
 
 rejected_count = len(
     [
@@ -927,7 +979,7 @@ o1.metric(
 )
 
 o2.metric(
-    "Positions",
+    "Open Positions",
     open_position_count,
 )
 
@@ -944,7 +996,6 @@ o3.metric(
 st.divider()
 
 st.subheader("Portfolio")
-
 
 if raw_positions:
 
@@ -980,7 +1031,7 @@ if raw_positions:
         target_weight = float_value(
             weights.get(
                 ticker,
-                0
+                0,
             )
         )
 
@@ -1070,8 +1121,8 @@ with st.expander(
     else:
 
         st.info(
-            "Target portfolio is not available on this "
-            "Render instance yet."
+            "Target portfolio is not currently available "
+            "on this Render instance."
         )
 
 
@@ -1105,7 +1156,6 @@ with st.expander(
         ]
 
         if existing_columns:
-
             orders_df = orders_df[
                 existing_columns
             ]
@@ -1142,7 +1192,6 @@ with b1:
     ):
 
         st.cache_data.clear()
-
         st.rerun()
 
 
@@ -1253,6 +1302,11 @@ with st.expander(
     )
 
     st.write(
+        "**Account currency:**",
+        currency,
+    )
+
+    st.write(
         "**Live money:** Locked"
     )
 
@@ -1308,6 +1362,11 @@ with st.expander(
         "Configured"
         if credentials_present()
         else "Missing",
+    )
+
+    st.write(
+        "**Reserved for orders:**",
+        f"{currency_symbol}{reserved_cash:,.2f}",
     )
 
     if decision:
