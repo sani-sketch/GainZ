@@ -30,29 +30,38 @@ st.set_page_config(
 
 
 # ============================================================
-# CACHED BROKER READS
+# CONSTANTS
 # ============================================================
 
-@st.cache_data(ttl=60)
+CACHE_TTL = 120
+
+
+# ============================================================
+# BROKER READS
+# ============================================================
+
+@st.cache_data(ttl=CACHE_TTL)
 def get_account_summary():
     broker = Trading212Broker(environment="demo")
     return broker.account_summary()
 
 
-@st.cache_data(ttl=60)
-def get_positions():
-    broker = Trading212Broker(environment="demo")
-    return broker.positions()
-
-
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=CACHE_TTL)
 def get_raw_positions():
+    """
+    One positions API call only.
+
+    We use this raw response for:
+    - open positions
+    - portfolio table
+    - profit/loss
+    """
     broker = Trading212Broker(environment="demo")
     return broker.raw_positions()
 
 
-@st.cache_data(ttl=60)
-def get_pending_orders():
+@st.cache_data(ttl=CACHE_TTL)
+def get_orders():
     broker = Trading212Broker(environment="demo")
     return broker.orders()
 
@@ -75,7 +84,7 @@ def credentials_present():
 
 def load_report():
     if not REPORT_PATH.exists():
-        return None
+        return {}
 
     try:
         return json.loads(
@@ -83,8 +92,9 @@ def load_report():
                 encoding="utf-8"
             )
         )
+
     except Exception:
-        return None
+        return {}
 
 
 def run_gainz(execute_demo=False):
@@ -142,16 +152,173 @@ def friendly_risk(name):
     )
 
 
-def get_position_value(position):
-    quantity = float(
-        getattr(position, "quantity", 0) or 0
+def is_rate_limit_error(error):
+    if not error:
+        return False
+
+    text = str(error).lower()
+
+    return (
+        "429" in text
+        or "toomanyrequests" in text
+        or "too many requests" in text
     )
 
-    price = float(
-        getattr(position, "price", 0) or 0
+
+def symbol_from_ticker(ticker):
+    ticker = str(ticker or "")
+
+    if "_" in ticker:
+        return ticker.split("_")[0]
+
+    return ticker
+
+
+def float_value(value, default=0.0):
+    try:
+        return float(value or 0)
+
+    except (TypeError, ValueError):
+        return default
+
+
+# ============================================================
+# ACCOUNT HELPERS
+# ============================================================
+
+def extract_cash(account):
+    """
+    Trading 212 account summary may contain nested cash data.
+    """
+
+    if not isinstance(account, dict):
+        return 0.0
+
+    cash = account.get("cash", {})
+
+    if isinstance(cash, dict):
+
+        for key in (
+            "availableToTrade",
+            "free",
+            "total",
+            "cash",
+        ):
+            if key in cash:
+                return float_value(
+                    cash.get(key)
+                )
+
+    return float_value(cash)
+
+
+def extract_investment_value(account):
+    """
+    Try to get account-currency investment value from Trading 212.
+    """
+
+    if not isinstance(account, dict):
+        return None
+
+    investments = account.get(
+        "investments",
+        {}
     )
 
-    return quantity * price
+    if isinstance(investments, dict):
+
+        for key in (
+            "currentValue",
+            "value",
+            "marketValue",
+        ):
+            if key in investments:
+                return float_value(
+                    investments.get(key)
+                )
+
+    for key in (
+        "portfolioValue",
+        "investmentsValue",
+    ):
+        if key in account:
+            return float_value(
+                account.get(key)
+            )
+
+    return None
+
+
+def extract_account_ppl(account):
+    """
+    Prefer broker-provided account P/L where available.
+    """
+
+    if not isinstance(account, dict):
+        return None
+
+    for key in (
+        "ppl",
+        "profitLoss",
+        "unrealizedPpl",
+    ):
+        if key in account:
+            return float_value(
+                account.get(key)
+            )
+
+    investments = account.get(
+        "investments",
+        {}
+    )
+
+    if isinstance(investments, dict):
+
+        for key in (
+            "ppl",
+            "profitLoss",
+            "unrealizedPpl",
+        ):
+            if key in investments:
+                return float_value(
+                    investments.get(key)
+                )
+
+    return None
+
+
+# ============================================================
+# SAFE BROKER FETCH
+# ============================================================
+
+def fetch_with_fallback(
+    cache_key,
+    fetch_function,
+):
+    """
+    Fetch broker data.
+
+    If Trading 212 temporarily rate-limits us,
+    retain the last successful response stored in the
+    user's Streamlit session.
+    """
+
+    try:
+        value = fetch_function()
+
+        st.session_state[
+            cache_key
+        ] = value
+
+        return value, None
+
+    except Exception as exc:
+
+        old_value = st.session_state.get(
+            cache_key
+        )
+
+        return old_value, str(exc)
 
 
 # ============================================================
@@ -166,7 +333,11 @@ preview_mode = st.sidebar.checkbox(
 )
 
 st.sidebar.caption(
-    "Preview mode is for UI testing only."
+    "Preview mode uses simulated data."
+)
+
+st.sidebar.caption(
+    f"Broker data refreshes every {CACHE_TTL} seconds."
 )
 
 
@@ -181,12 +352,15 @@ st.caption(
 )
 
 if preview_mode:
+
     st.warning(
         "🧪 Preview mode is ON — showing sample data"
     )
+
 else:
+
     st.success(
-        "🟢 System running in Practice mode"
+        "🟢 Connected to Trading 212 Practice"
     )
 
 st.info(
@@ -195,146 +369,10 @@ st.info(
 
 
 # ============================================================
-# LOAD BROKER STATE
-# ============================================================
-
-broker_error = None
-account = {}
-positions = []
-raw_positions = []
-pending_orders = []
-
-if not preview_mode:
-    try:
-        account = get_account_summary()
-        positions = get_positions()
-        raw_positions = get_raw_positions()
-        pending_orders = get_pending_orders()
-
-    except Exception as exc:
-        broker_error = str(exc)
-
-
-# ============================================================
 # LOAD REPORT
 # ============================================================
 
-report = load_report() or {}
-
-
-# ============================================================
-# PREVIEW SAMPLE DATA
-# ============================================================
-
-if preview_mode:
-
-    report = {
-        "environment": "demo",
-        "executed": True,
-        "cash_available": 5000.00,
-        "decision": {
-            "mode": "GAINZ",
-            "variant": "N15_momentum_trend_none",
-            "risk": "vol12_defensive",
-            "exposure": 0.88,
-            "gainz_sharpe": 2.21,
-            "benchmark_sharpe": 1.27,
-        },
-        "target_weights": {
-            "AMD": 0.0587,
-            "MU": 0.0587,
-            "PANW": 0.0587,
-            "FTNT": 0.0587,
-            "CRM": 0.0587,
-            "BAC": 0.0587,
-        },
-        "orders": [
-            {
-                "symbol": "AMD",
-                "quantity": 0.56,
-                "status": "FILLED",
-                "message": "BUY",
-            },
-            {
-                "symbol": "MU",
-                "quantity": 0.29,
-                "status": "FILLED",
-                "message": "BUY",
-            },
-            {
-                "symbol": "PANW",
-                "quantity": 0.84,
-                "status": "PENDING",
-                "message": "BUY",
-            },
-        ],
-    }
-
-    class PreviewPosition:
-        def __init__(
-            self,
-            symbol,
-            quantity,
-            price,
-        ):
-            self.symbol = symbol
-            self.quantity = quantity
-            self.price = price
-
-    positions = [
-        PreviewPosition(
-            "AMD",
-            1.50,
-            190.00,
-        ),
-        PreviewPosition(
-            "MU",
-            2.00,
-            145.00,
-        ),
-        PreviewPosition(
-            "CRM",
-            1.10,
-            265.00,
-        ),
-    ]
-
-    raw_positions = [
-        {
-            "ticker": "AMD_US_EQ",
-            "quantity": 1.50,
-            "averagePrice": 175.00,
-            "currentPrice": 190.00,
-        },
-        {
-            "ticker": "MU_US_EQ",
-            "quantity": 2.00,
-            "averagePrice": 150.00,
-            "currentPrice": 145.00,
-        },
-        {
-            "ticker": "CRM_US_EQ",
-            "quantity": 1.10,
-            "averagePrice": 250.00,
-            "currentPrice": 265.00,
-        },
-    ]
-
-    pending_orders = [
-        {
-            "ticker": "PANW_US_EQ",
-            "side": "BUY",
-            "quantity": 0.84,
-            "filledQuantity": 0,
-            "status": "NEW",
-            "createdAt": "Preview",
-        }
-    ]
-
-
-# ============================================================
-# EXTRACT REPORT VALUES
-# ============================================================
+report = load_report()
 
 decision = report.get(
     "decision",
@@ -351,14 +389,6 @@ execution_orders = report.get(
     [],
 )
 
-cash_available = float(
-    report.get(
-        "cash_available",
-        0,
-    )
-    or 0
-)
-
 executed = bool(
     report.get(
         "executed",
@@ -366,34 +396,228 @@ executed = bool(
     )
 )
 
-exposure = float(
-    decision.get(
-        "exposure",
-        0,
+
+# ============================================================
+# BROKER DATA
+# ============================================================
+
+account = {}
+raw_positions = []
+broker_orders = []
+
+account_error = None
+positions_error = None
+orders_error = None
+
+
+if not preview_mode:
+
+    account, account_error = fetch_with_fallback(
+        "last_good_account",
+        get_account_summary,
     )
-    or 0
+
+    raw_positions, positions_error = fetch_with_fallback(
+        "last_good_positions",
+        get_raw_positions,
+    )
+
+    broker_orders, orders_error = fetch_with_fallback(
+        "last_good_orders",
+        get_orders,
+    )
+
+
+account = account or {}
+raw_positions = raw_positions or []
+broker_orders = broker_orders or []
+
+
+# ============================================================
+# PREVIEW DATA
+# ============================================================
+
+if preview_mode:
+
+    account = {
+        "cash": {
+            "availableToTrade": 3500.00,
+        },
+        "investments": {
+            "currentValue": 1500.00,
+        },
+        "ppl": 72.50,
+    }
+
+    report = {
+        "environment": "demo",
+        "executed": True,
+        "decision": {
+            "mode": "GAINZ",
+            "variant": "N15_momentum_trend_none",
+            "risk": "vol12_defensive",
+            "exposure": 0.88,
+            "gainz_sharpe": 2.21,
+            "benchmark_sharpe": 1.27,
+        },
+        "target_weights": {
+            "AMD": 0.0587,
+            "MU": 0.0587,
+            "PANW": 0.0587,
+            "FTNT": 0.0587,
+            "CRM": 0.0587,
+            "BAC": 0.0587,
+        },
+    }
+
+    decision = report["decision"]
+    weights = report["target_weights"]
+    executed = True
+
+    raw_positions = [
+        {
+            "ticker": "AMD_US_EQ",
+            "quantity": 1.50,
+            "averagePrice": 175.00,
+            "currentPrice": 190.00,
+            "ppl": 22.50,
+        },
+        {
+            "ticker": "MU_US_EQ",
+            "quantity": 2.00,
+            "averagePrice": 150.00,
+            "currentPrice": 145.00,
+            "ppl": -10.00,
+        },
+        {
+            "ticker": "CRM_US_EQ",
+            "quantity": 1.10,
+            "averagePrice": 250.00,
+            "currentPrice": 265.00,
+            "ppl": 16.50,
+        },
+    ]
+
+    broker_orders = [
+        {
+            "ticker": "PANW_US_EQ",
+            "side": "BUY",
+            "quantity": 0.84,
+            "filledQuantity": 0,
+            "status": "NEW",
+            "createdAt": "Preview",
+        }
+    ]
+
+
+# ============================================================
+# CALCULATED VALUES
+# ============================================================
+
+cash_available = extract_cash(
+    account
 )
+
+investment_value = extract_investment_value(
+    account
+)
+
+account_ppl = extract_account_ppl(
+    account
+)
+
+open_position_count = len(
+    raw_positions
+)
+
+pending_count = len(
+    broker_orders
+)
+
+
+# Exposure in account currency, if broker provides both values.
+
+if (
+    investment_value is not None
+    and investment_value + cash_available > 0
+):
+
+    exposure = (
+        investment_value
+        / (
+            investment_value
+            + cash_available
+        )
+    )
+
+else:
+
+    exposure = float_value(
+        decision.get(
+            "exposure",
+            0,
+        )
+    )
 
 
 # ============================================================
 # SYSTEM HEALTH
 # ============================================================
 
+all_errors = [
+    error
+    for error in (
+        account_error,
+        positions_error,
+        orders_error,
+    )
+    if error
+]
+
+rate_limited = any(
+    is_rate_limit_error(error)
+    for error in all_errors
+)
+
+
 if preview_mode:
+
     health = "PREVIEW"
     health_icon = "🧪"
 
-elif broker_error:
+elif rate_limited:
+
+    health = "LIMITED"
+    health_icon = "🟡"
+
+elif all_errors and not raw_positions:
+
     health = "ERROR"
     health_icon = "🔴"
 
-elif pending_orders:
+elif pending_count > 0:
+
     health = "PENDING"
     health_icon = "🟡"
 
 else:
+
     health = "HEALTHY"
     health_icon = "🟢"
+
+
+# ============================================================
+# RATE LIMIT WARNING
+# ============================================================
+
+if rate_limited:
+
+    st.warning(
+        "Trading 212 temporarily rate-limited one or more "
+        "dashboard requests. GainZ is showing the last "
+        "successfully loaded data where available. "
+        "You do not need to keep refreshing."
+    )
 
 
 # ============================================================
@@ -421,7 +645,7 @@ c3.metric(
 
 c4.metric(
     "Open Positions",
-    len(positions),
+    open_position_count,
 )
 
 
@@ -433,78 +657,71 @@ st.divider()
 
 st.subheader("Today")
 
-if broker_error and not preview_mode:
+mode = decision.get(
+    "mode",
+    "N/A",
+)
 
-    if (
-        "TooManyRequests" in broker_error
-        or "429" in broker_error
-    ):
-        st.warning(
-            "Trading 212 is temporarily rate-limiting requests. "
-            "Wait a minute, then press Refresh once."
-        )
-    else:
-        st.error(
-            f"GainZ cannot connect to Trading 212: {broker_error}"
-        )
+strategy = friendly_strategy(
+    decision.get(
+        "variant"
+    )
+)
+
+risk_mode = friendly_risk(
+    decision.get(
+        "risk"
+    )
+)
+
+
+if preview_mode:
+
+    action_text = (
+        "Preview mode is showing sample data."
+    )
+
+elif executed:
+
+    action_text = (
+        "Practice orders were submitted by GainZ."
+    )
+
+elif report:
+
+    action_text = (
+        "A GainZ plan has been generated."
+    )
 
 else:
 
-    mode = decision.get(
-        "mode",
-        "N/A",
+    action_text = (
+        "Broker data is live. "
+        "No local strategy report is available on this Render instance."
     )
 
-    strategy = friendly_strategy(
-        decision.get("variant")
-    )
 
-    risk_mode = friendly_risk(
-        decision.get("risk")
-    )
+t1, t2, t3 = st.columns(3)
 
-    if preview_mode:
-        action_text = (
-            "Preview mode is showing sample portfolio data."
-        )
+t1.write(
+    f"**Mode:** {mode}"
+)
 
-    elif executed:
-        action_text = (
-            "Practice orders were submitted."
-        )
+t2.write(
+    f"**Strategy:** {strategy}"
+)
 
-    elif report:
-        action_text = (
-            "A new plan was generated. "
-            "No orders were submitted."
-        )
+t3.write(
+    f"**Risk:** {risk_mode}"
+)
 
-    else:
-        action_text = (
-            "No GainZ plan has been generated yet."
-        )
-
-    t1, t2, t3 = st.columns(3)
-
-    t1.write(
-        f"**Mode:** {mode}"
-    )
-
-    t2.write(
-        f"**Strategy:** {strategy}"
-    )
-
-    t3.write(
-        f"**Risk mode:** {risk_mode}"
-    )
-
-    st.write(
-        f"**Today's action:** {action_text}"
-    )
+st.write(
+    f"**Status:** {action_text}"
+)
 
 
 # ============================================================
-# PROFIT / LOSS
+# PERFORMANCE
 # ============================================================
 
 st.divider()
@@ -513,68 +730,95 @@ st.subheader("Performance")
 
 performance_rows = []
 
-total_cost = 0.0
-total_value = 0.0
+calculated_total_cost = 0.0
+calculated_total_value = 0.0
+calculated_total_ppl = 0.0
 
-for p in raw_positions:
 
-    ticker = str(
-        p.get(
-            "ticker",
-            "",
+for position in raw_positions:
+
+    ticker = symbol_from_ticker(
+        position.get(
+            "ticker"
         )
-    ).split("_")[0]
-
-    quantity = float(
-        p.get(
-            "quantity",
-            0,
-        )
-        or 0
     )
 
-    average_price = float(
-        p.get(
-            "averagePrice",
-            0,
+    quantity = float_value(
+        position.get(
+            "quantity"
         )
-        or 0
     )
 
-    current_price = float(
-        p.get(
+    average_price = float_value(
+        position.get(
+            "averagePrice"
+        )
+    )
+
+    current_price = float_value(
+        position.get(
             "currentPrice",
-            0,
+            average_price,
         )
-        or 0
     )
 
-    cost = quantity * average_price
-    value = quantity * current_price
-    profit = value - cost
+    cost = (
+        quantity
+        * average_price
+    )
+
+    current_value = (
+        quantity
+        * current_price
+    )
+
+    calculated_ppl = (
+        current_value
+        - cost
+    )
+
+    # Prefer broker P/L if Trading 212 supplies it.
+    broker_ppl = position.get(
+        "ppl"
+    )
+
+    if broker_ppl is not None:
+
+        pnl = float_value(
+            broker_ppl
+        )
+
+    else:
+
+        pnl = calculated_ppl
 
     return_pct = (
-        (profit / cost) * 100
+        (calculated_ppl / cost) * 100
         if cost
         else 0
     )
 
-    total_cost += cost
-    total_value += value
+    calculated_total_cost += cost
+    calculated_total_value += current_value
+    calculated_total_ppl += pnl
 
     performance_rows.append(
         {
             "Ticker": ticker,
-            "Invested": round(
-                cost,
+            "Quantity": round(
+                quantity,
+                4,
+            ),
+            "Average Price": round(
+                average_price,
                 2,
             ),
-            "Current Value": round(
-                value,
+            "Current Price": round(
+                current_price,
                 2,
             ),
             "P/L": round(
-                profit,
+                pnl,
                 2,
             ),
             "Return %": round(
@@ -585,31 +829,39 @@ for p in raw_positions:
     )
 
 
-total_profit = total_value - total_cost
-
-total_return = (
-    (total_profit / total_cost) * 100
-    if total_cost
-    else 0
+# Prefer broker-level account P/L if provided.
+display_ppl = (
+    account_ppl
+    if account_ppl is not None
+    else calculated_total_ppl
 )
 
 
 p1, p2, p3 = st.columns(3)
 
 p1.metric(
-    "Invested Capital",
-    f"{total_cost:,.2f}",
+    "Open Positions",
+    open_position_count,
 )
 
-p2.metric(
-    "Current Value",
-    f"{total_value:,.2f}",
-)
+if investment_value is not None:
+
+    p2.metric(
+        "Portfolio Value",
+        f"£{investment_value:,.2f}",
+    )
+
+else:
+
+    p2.metric(
+        "Portfolio",
+        "Connected",
+    )
+
 
 p3.metric(
-    "Profit / Loss",
-    f"{total_profit:,.2f}",
-    f"{total_return:.2f}%",
+    "P/L",
+    f"£{display_ppl:,.2f}",
 )
 
 
@@ -628,36 +880,34 @@ if performance_rows:
 else:
 
     st.info(
-        "No open positions yet, so there is no P/L to display."
+        "No open Practice positions."
     )
 
 
+st.caption(
+    "Portfolio-level £ values use Trading 212 account data "
+    "where available. Individual US-stock prices may be "
+    "quoted in the instrument's trading currency."
+)
+
+
 # ============================================================
-# ORDER STATUS
+# ORDERS
 # ============================================================
 
 st.divider()
 
 st.subheader("Orders")
 
-o1, o2, o3 = st.columns(3)
-
-pending_count = len(
-    pending_orders
-)
-
-filled_count = len(
-    positions
-)
 
 rejected_count = len(
     [
         order
-        for order in execution_orders
+        for order in broker_orders
         if str(
             order.get(
                 "status",
-                "",
+                ""
             )
         ).upper()
         in {
@@ -668,14 +918,17 @@ rejected_count = len(
     ]
 )
 
+
+o1, o2, o3 = st.columns(3)
+
 o1.metric(
     "Pending",
     pending_count,
 )
 
 o2.metric(
-    "Open Positions",
-    filled_count,
+    "Positions",
+    open_position_count,
 )
 
 o3.metric(
@@ -692,73 +945,82 @@ st.divider()
 
 st.subheader("Portfolio")
 
-if positions:
 
-    position_rows = []
+if raw_positions:
 
-    for p in positions:
+    portfolio_rows = []
 
-        target_weight = weights.get(
-            p.symbol,
-            0,
-        )
+    for position in raw_positions:
 
-        quantity = float(
-            getattr(
-                p,
-                "quantity",
-                0,
+        ticker = symbol_from_ticker(
+            position.get(
+                "ticker"
             )
-            or 0
         )
 
-        price = float(
-            getattr(
-                p,
-                "price",
-                0,
+        quantity = float_value(
+            position.get(
+                "quantity"
             )
-            or 0
         )
 
-        position_value = quantity * price
+        average_price = float_value(
+            position.get(
+                "averagePrice"
+            )
+        )
 
-        position_rows.append(
+        current_price = float_value(
+            position.get(
+                "currentPrice",
+                average_price,
+            )
+        )
+
+        target_weight = float_value(
+            weights.get(
+                ticker,
+                0
+            )
+        )
+
+        portfolio_rows.append(
             {
-                "Ticker": p.symbol,
+                "Ticker": ticker,
                 "Quantity": round(
                     quantity,
                     4,
                 ),
-                "Price": round(
-                    price,
+                "Average Price": round(
+                    average_price,
                     2,
                 ),
-                "Value": round(
-                    position_value,
+                "Current Price": round(
+                    current_price,
                     2,
                 ),
                 "Target %": round(
                     target_weight * 100,
-                    1,
+                    2,
                 ),
                 "Status": "Held",
             }
         )
 
-    positions_df = pd.DataFrame(
-        position_rows
+    portfolio_df = pd.DataFrame(
+        portfolio_rows
     )
 
     st.dataframe(
-        positions_df,
+        portfolio_df,
         use_container_width=True,
         hide_index=True,
     )
 
 else:
+
     st.info(
-        "No open positions yet."
+        "No open Practice positions."
     )
 
 
@@ -767,24 +1029,25 @@ else:
 # ============================================================
 
 with st.expander(
-    "View target portfolio"
+    "🎯 View target portfolio"
 ):
 
     if weights:
 
-        target_rows = []
-
-        for ticker, weight in weights.items():
-
-            target_rows.append(
-                {
-                    "Ticker": ticker,
-                    "Target Weight %": round(
-                        float(weight) * 100,
-                        2,
-                    ),
-                }
-            )
+        target_rows = [
+            {
+                "Ticker": ticker,
+                "Target Weight %": round(
+                    float_value(
+                        weight
+                    )
+                    * 100,
+                    2,
+                ),
+            }
+            for ticker, weight
+            in weights.items()
+        ]
 
         target_df = pd.DataFrame(
             target_rows
@@ -805,23 +1068,25 @@ with st.expander(
         )
 
     else:
+
         st.info(
-            "No target portfolio available."
+            "Target portfolio is not available on this "
+            "Render instance yet."
         )
 
 
 # ============================================================
-# PENDING ORDERS
+# BROKER ORDERS
 # ============================================================
 
 with st.expander(
-    "View pending broker orders"
+    "📋 View broker orders"
 ):
 
-    if pending_orders:
+    if broker_orders:
 
-        pending_df = pd.DataFrame(
-            pending_orders
+        orders_df = pd.DataFrame(
+            broker_orders
         )
 
         preferred_columns = [
@@ -833,26 +1098,28 @@ with st.expander(
             "createdAt",
         ]
 
-        existing = [
+        existing_columns = [
             column
             for column in preferred_columns
-            if column in pending_df.columns
+            if column in orders_df.columns
         ]
 
-        if existing:
-            pending_df = pending_df[
-                existing
+        if existing_columns:
+
+            orders_df = orders_df[
+                existing_columns
             ]
 
         st.dataframe(
-            pending_df,
+            orders_df,
             use_container_width=True,
             hide_index=True,
         )
 
     else:
+
         st.success(
-            "No pending orders."
+            "No pending broker orders."
         )
 
 
@@ -870,10 +1137,12 @@ b1, b2, b3 = st.columns(3)
 with b1:
 
     if st.button(
-        "🔄 Refresh",
+        "🔄 Refresh Broker Data",
         use_container_width=True,
     ):
+
         st.cache_data.clear()
+
         st.rerun()
 
 
@@ -889,48 +1158,52 @@ with b2:
     ):
 
         with st.spinner(
-            "GainZ is generating a new plan..."
+            "Generating GainZ plan..."
         ):
+
             result = run_gainz(
                 execute_demo=False
             )
 
-        st.cache_data.clear()
-
         if result["success"]:
+
             st.success(
-                "New plan generated."
+                "GainZ plan generated."
             )
-            st.rerun()
 
         else:
+
             st.error(
                 result["stderr"]
+                or "Plan generation failed."
             )
 
 
 with b3:
 
-    confirm = st.checkbox(
+    practice_confirm = st.checkbox(
         "I confirm this is Practice money",
         disabled=preview_mode,
     )
 
+    execute_disabled = (
+        preview_mode
+        or not credentials_present()
+        or not practice_confirm
+        or pending_count > 0
+    )
+
     if st.button(
         "🧪 Execute Practice",
-        use_container_width=True,
         type="primary",
-        disabled=(
-            preview_mode
-            or not credentials_present()
-            or not confirm
-            or pending_count > 0
-        ),
+        use_container_width=True,
+        disabled=execute_disabled,
     ):
 
         with st.spinner(
             "Submitting Practice orders..."
         ):
+
             result = run_gainz(
                 execute_demo=True
             )
@@ -938,50 +1211,97 @@ with b3:
         st.cache_data.clear()
 
         if result["success"]:
+
             st.success(
                 "Practice orders submitted."
             )
-            st.rerun()
 
         else:
+
             st.error(
                 result["stderr"]
+                or "Practice execution failed."
             )
 
 
 if preview_mode:
 
     st.info(
-        "Preview mode disables trading controls."
+        "Trading controls are disabled in Preview mode."
     )
 
 elif pending_count > 0:
 
     st.warning(
-        "Execution is disabled while pending orders exist."
+        "Practice execution is disabled while broker "
+        "orders are pending."
     )
+
+
+# ============================================================
+# CONNECTION STATUS
+# ============================================================
+
+st.divider()
+
+with st.expander(
+    "🔌 Connection status"
+):
+
+    st.write(
+        "**Trading environment:** Practice / Demo"
+    )
+
+    st.write(
+        "**Live money:** Locked"
+    )
+
+    st.write(
+        "**Cache duration:**",
+        f"{CACHE_TTL} seconds",
+    )
+
+    st.write(
+        "**Account API:**",
+        "✅ OK"
+        if not account_error
+        else "⚠️ Temporary issue",
+    )
+
+    st.write(
+        "**Positions API:**",
+        "✅ OK"
+        if not positions_error
+        else "⚠️ Temporary issue",
+    )
+
+    st.write(
+        "**Orders API:**",
+        "✅ OK"
+        if not orders_error
+        else "⚠️ Temporary issue",
+    )
+
+    if all_errors:
+
+        st.caption(
+            "Technical details:"
+        )
+
+        for error in all_errors:
+
+            st.code(
+                str(error)
+            )
 
 
 # ============================================================
 # ADVANCED
 # ============================================================
 
-st.divider()
-
 with st.expander(
     "⚙️ Advanced"
 ):
-
-    st.write(
-        "**Environment:**",
-        "Preview"
-        if preview_mode
-        else "Practice / Demo",
-    )
-
-    st.write(
-        "**Live trading:** Locked"
-    )
 
     st.write(
         "**Credentials:**",
@@ -995,9 +1315,10 @@ with st.expander(
         st.write(
             "**GainZ Sharpe:**",
             round(
-                decision.get(
-                    "gainz_sharpe",
-                    0,
+                float_value(
+                    decision.get(
+                        "gainz_sharpe"
+                    )
                 ),
                 2,
             ),
@@ -1006,16 +1327,17 @@ with st.expander(
         st.write(
             "**Benchmark Sharpe:**",
             round(
-                decision.get(
-                    "benchmark_sharpe",
-                    0,
+                float_value(
+                    decision.get(
+                        "benchmark_sharpe"
+                    )
                 ),
                 2,
             ),
         )
 
     st.write(
-        "**Raw GainZ report:**"
+        "**Raw strategy report:**"
     )
 
     st.json(
@@ -1030,8 +1352,8 @@ with st.expander(
 st.divider()
 
 st.caption(
-    "GainZ • Practice trading only • "
-    "Preview mode is simulated • "
-    "Broker data is cached for 60 seconds • "
+    "GainZ • Trading 212 Practice • "
+    "Broker reads cached for 120 seconds • "
+    "Real-money trading locked • "
     "Historical performance does not guarantee future returns."
 )
