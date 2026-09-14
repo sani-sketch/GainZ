@@ -151,6 +151,13 @@ def is_rate_limit_error(error):
     )
 
 
+def float_value(value, default=0.0):
+    try:
+        return float(value or 0)
+    except (TypeError, ValueError):
+        return default
+
+
 def symbol_from_ticker(ticker):
     ticker = str(ticker or "")
 
@@ -160,11 +167,27 @@ def symbol_from_ticker(ticker):
     return ticker
 
 
-def float_value(value, default=0.0):
-    try:
-        return float(value or 0)
-    except (TypeError, ValueError):
-        return default
+def extract_position_symbol(position):
+    instrument = position.get(
+        "instrument",
+        {},
+    )
+
+    if isinstance(instrument, dict):
+
+        value = (
+            instrument.get("ticker")
+            or instrument.get("symbol")
+            or instrument.get("name")
+            or instrument.get("shortName")
+        )
+
+        if value:
+            return symbol_from_ticker(
+                value
+            )
+
+    return "Unknown"
 
 
 # ============================================================
@@ -495,7 +518,9 @@ if preview_mode:
 
     raw_positions = [
         {
-            "ticker": "AMD_US_EQ",
+            "instrument": {
+                "ticker": "AMD_US_EQ",
+            },
             "quantity": 0.8398,
             "currentPrice": 373.55,
             "averagePricePaid": 350.11,
@@ -508,7 +533,9 @@ if preview_mode:
             },
         },
         {
-            "ticker": "MU_US_EQ",
+            "instrument": {
+                "ticker": "MU_US_EQ",
+            },
             "quantity": 1.25,
             "currentPrice": 145.20,
             "averagePricePaid": 147.80,
@@ -822,10 +849,8 @@ performance_rows = []
 
 for position in raw_positions:
 
-    ticker = symbol_from_ticker(
-        position.get(
-            "ticker"
-        )
+    ticker = extract_position_symbol(
+        position
     )
 
     quantity = float_value(
@@ -1009,10 +1034,8 @@ if raw_positions:
 
     for position in raw_positions:
 
-        ticker = symbol_from_ticker(
-            position.get(
-                "ticker"
-            )
+        ticker = extract_position_symbol(
+            position
         )
 
         quantity = float_value(
