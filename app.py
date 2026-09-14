@@ -142,6 +142,18 @@ def friendly_risk(name):
     )
 
 
+def get_position_value(position):
+    quantity = float(
+        getattr(position, "quantity", 0) or 0
+    )
+
+    price = float(
+        getattr(position, "price", 0) or 0
+    )
+
+    return quantity * price
+
+
 # ============================================================
 # SIDEBAR
 # ============================================================
@@ -241,19 +253,19 @@ if preview_mode:
                 "symbol": "AMD",
                 "quantity": 0.56,
                 "status": "FILLED",
-                "message": "BUY £287.57",
+                "message": "BUY",
             },
             {
                 "symbol": "MU",
                 "quantity": 0.29,
                 "status": "FILLED",
-                "message": "BUY £287.57",
+                "message": "BUY",
             },
             {
                 "symbol": "PANW",
                 "quantity": 0.84,
                 "status": "PENDING",
-                "message": "BUY £287.57",
+                "message": "BUY",
             },
         ],
     }
@@ -264,31 +276,26 @@ if preview_mode:
             symbol,
             quantity,
             price,
-            value,
         ):
             self.symbol = symbol
             self.quantity = quantity
             self.price = price
-            self.value = value
 
     positions = [
         PreviewPosition(
             "AMD",
             1.50,
             190.00,
-            285.00,
         ),
         PreviewPosition(
             "MU",
             2.00,
             145.00,
-            290.00,
         ),
         PreviewPosition(
             "CRM",
             1.10,
             265.00,
-            291.50,
         ),
     ]
 
@@ -408,7 +415,7 @@ c2.metric(
 )
 
 c3.metric(
-    "Invested",
+    "Exposure",
     f"{exposure * 100:.0f}%",
 )
 
@@ -542,20 +549,9 @@ for p in raw_positions:
         or 0
     )
 
-    cost = (
-        quantity
-        * average_price
-    )
-
-    value = (
-        quantity
-        * current_price
-    )
-
-    profit = (
-        value
-        - cost
-    )
+    cost = quantity * average_price
+    value = quantity * current_price
+    profit = value - cost
 
     return_pct = (
         (profit / cost) * 100
@@ -589,10 +585,7 @@ for p in raw_positions:
     )
 
 
-total_profit = (
-    total_value
-    - total_cost
-)
+total_profit = total_value - total_cost
 
 total_return = (
     (total_profit / total_cost) * 100
@@ -605,17 +598,17 @@ p1, p2, p3 = st.columns(3)
 
 p1.metric(
     "Invested Capital",
-    f"£{total_cost:,.2f}",
+    f"{total_cost:,.2f}",
 )
 
 p2.metric(
     "Current Value",
-    f"£{total_value:,.2f}",
+    f"{total_value:,.2f}",
 )
 
 p3.metric(
     "Profit / Loss",
-    f"£{total_profit:,.2f}",
+    f"{total_profit:,.2f}",
     f"{total_return:.2f}%",
 )
 
@@ -710,19 +703,39 @@ if positions:
             0,
         )
 
+        quantity = float(
+            getattr(
+                p,
+                "quantity",
+                0,
+            )
+            or 0
+        )
+
+        price = float(
+            getattr(
+                p,
+                "price",
+                0,
+            )
+            or 0
+        )
+
+        position_value = quantity * price
+
         position_rows.append(
             {
                 "Ticker": p.symbol,
                 "Quantity": round(
-                    p.quantity,
+                    quantity,
                     4,
                 ),
                 "Price": round(
-                    p.price,
+                    price,
                     2,
                 ),
                 "Value": round(
-                    p.value,
+                    position_value,
                     2,
                 ),
                 "Target %": round(
