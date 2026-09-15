@@ -7,3 +7,6 @@ apscheduler
 pandas-market-calendars
 python-dotenv
 streamlit
+feedparser
+transformers
+torch
