@@ -1573,31 +1573,155 @@ st.caption(
     "block scheduled orders until we add a shared persistent pause state."
 )
 
-st.markdown("#### 🚨 Sell Entire Practice Portfolio")
+sst.markdown("#### 🚨 Sell Entire Practice Portfolio")
 
-portfolio_value_for_exit = sum(
-    float_value(
-        (position.get("walletImpact") or {}).get("currentValue")
+# ------------------------------------------------------------
+# Calculate full-portfolio exit values directly from
+# Trading 212 walletImpact data (GBP)
+# ------------------------------------------------------------
+
+portfolio_value_for_exit = 0.0
+portfolio_cost_for_exit = 0.0
+portfolio_profit_for_exit = 0.0
+
+for position in raw_positions:
+
+    wallet = position.get(
+        "walletImpact",
+        {},
+    ) or {}
+
+    portfolio_value_for_exit += float_value(
+        wallet.get(
+            "currentValue"
+        )
     )
-    for position in raw_positions
-)
+
+    portfolio_cost_for_exit += float_value(
+        wallet.get(
+            "totalCost"
+        )
+    )
+
+    portfolio_profit_for_exit += float_value(
+        wallet.get(
+            "unrealizedProfitLoss"
+        )
+    )
+
+
+# ------------------------------------------------------------
+# Portfolio return %
+# ------------------------------------------------------------
+
+if portfolio_cost_for_exit > 0:
+
+    portfolio_return_for_exit = (
+        portfolio_profit_for_exit
+        / portfolio_cost_for_exit
+    ) * 100
+
+else:
+
+    portfolio_return_for_exit = 0.0
+
+
+# ------------------------------------------------------------
+# Exit summary
+# ------------------------------------------------------------
 
 st.write(
-    f"Open positions: **{len(raw_positions)}**  •  "
-    f"Approx. invested value: **{currency_symbol}{portfolio_value_for_exit:,.2f}**"
+    f"Open positions: **{len(raw_positions)}**"
 )
+
+e1, e2, e3, e4 = st.columns(4)
+
+e1.metric(
+    "Current Value",
+    f"{currency_symbol}{portfolio_value_for_exit:,.2f}",
+)
+
+e2.metric(
+    "Total Cost",
+    f"{currency_symbol}{portfolio_cost_for_exit:,.2f}",
+)
+
+e3.metric(
+    "Profit to Book",
+    f"{currency_symbol}{portfolio_profit_for_exit:,.2f}",
+    delta=f"{portfolio_return_for_exit:+.2f}%",
+)
+
+e4.metric(
+    "Est. Cash From Sale",
+    f"{currency_symbol}{portfolio_value_for_exit:,.2f}",
+)
+
+
+# ------------------------------------------------------------
+# Human-readable explanation
+# ------------------------------------------------------------
+
+if portfolio_profit_for_exit > 0:
+
+    st.success(
+        f"💰 If you sold the entire portfolio at approximately "
+        f"the current prices, you would book around "
+        f"{currency_symbol}{portfolio_profit_for_exit:,.2f} "
+        f"of profit ({portfolio_return_for_exit:+.2f}%)."
+    )
+
+elif portfolio_profit_for_exit < 0:
+
+    st.warning(
+        f"⚠️ The portfolio currently has an unrealised loss of "
+        f"{currency_symbol}{abs(portfolio_profit_for_exit):,.2f} "
+        f"({portfolio_return_for_exit:+.2f}%). "
+        f"Selling everything now would approximately realise this loss."
+    )
+
+else:
+
+    st.info(
+        "The portfolio is currently approximately at break-even."
+    )
+
+
+st.caption(
+    "Estimate only. Final realised P/L can differ because market prices "
+    "and GBP/USD FX rates may change before the orders are filled."
+)
+
+
+# ------------------------------------------------------------
+# SELL ALL confirmation
+# ------------------------------------------------------------
 
 sell_all_text = st.text_input(
     "Type SELL ALL to unlock the full-portfolio exit",
     key="sell_all_confirmation_text",
-    disabled=preview_mode or not raw_positions or pending_count > 0,
+    disabled=(
+        preview_mode
+        or not raw_positions
+        or pending_count > 0
+    ),
 )
 
 sell_all_ack = st.checkbox(
-    "I understand this will submit SELL orders for every open Trading 212 Practice position.",
+    "I understand this will submit SELL orders for every open "
+    "Trading 212 Practice position.",
     key="sell_all_ack",
-    disabled=preview_mode or not raw_positions or pending_count > 0,
+    disabled=(
+        preview_mode
+        or not raw_positions
+        or pending_count > 0
+    ),
 )
+
+
+# ------------------------------------------------------------
+# Final safety check
+# ------------------------------------------------------------
 
 sell_all_disabled = (
     preview_mode
@@ -1608,48 +1732,86 @@ sell_all_disabled = (
     or not sell_all_ack
 )
 
+
+# ------------------------------------------------------------
+# Execute SELL ALL
+# ------------------------------------------------------------
+
 if st.button(
     "🚨 Close All Practice Positions",
     type="primary",
     use_container_width=True,
     disabled=sell_all_disabled,
 ):
-    # Pause locally before submitting the exit.
+
+    # Pause locally before attempting liquidation
     set_gainz_paused(True)
 
-    with st.spinner("Submitting Practice sell orders for all open positions..."):
-        results = submit_practice_sell_all(raw_positions)
+    with st.spinner(
+        "Submitting Practice sell orders for all open positions..."
+    ):
+
+        results = submit_practice_sell_all(
+            raw_positions
+        )
+
 
     if not results:
-        st.warning("No sellable Practice positions were found.")
+
+        st.warning(
+            "No sellable Practice positions were found."
+        )
+
     else:
-        result_df = pd.DataFrame(results)
-        st.dataframe(result_df, use_container_width=True, hide_index=True)
+
+        result_df = pd.DataFrame(
+            results
+        )
+
+        st.dataframe(
+            result_df,
+            use_container_width=True,
+            hide_index=True,
+        )
+
 
         failed = result_df[
-            result_df["status"].str.upper().isin(
-                ["REJECTED", "FAILED", "ERROR"]
+            result_df["status"]
+            .str.upper()
+            .isin(
+                [
+                    "REJECTED",
+                    "FAILED",
+                    "ERROR",
+                ]
             )
         ]
 
+
         if failed.empty:
+
             st.success(
-                "All available Practice sell orders were submitted. "
+                f"All available Practice sell orders were submitted. "
+                f"Approximately "
+                f"{currency_symbol}{portfolio_profit_for_exit:,.2f} "
+                f"of current unrealised P/L was available to be realised "
+                f"before execution."
+            )
+
+            st.info(
                 "GainZ dashboard pause has been enabled."
             )
+
         else:
+
             st.error(
                 "At least one sell did not submit successfully. "
-                "Do not retry blindly; review the result table and broker orders first."
+                "Do not retry blindly. Review the result table "
+                "and Trading 212 orders first."
             )
 
+
         st.cache_data.clear()
-
-if pending_count > 0:
-    st.warning(
-        "Full-portfolio exit is disabled while Trading 212 reports pending orders."
-    )
-
 
 # ============================================================
 # CONTROLS
