@@ -1573,7 +1573,7 @@ st.caption(
     "block scheduled orders until we add a shared persistent pause state."
 )
 
-sst.markdown("#### 🚨 Sell Entire Practice Portfolio")
+st.markdown("#### 🚨 Sell Entire Practice Portfolio")
 
 # ------------------------------------------------------------
 # Calculate full-portfolio exit values directly from
