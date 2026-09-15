@@ -19,6 +19,7 @@ ROOT = Path(__file__).resolve().parent
 REPORT_PATH = ROOT / "outputs" / "trading212_demo_report.json"
 RUNNER_PATH = ROOT / "run_trading212.py"
 ENV_PATH = ROOT / ".env"
+PAUSE_PATH = ROOT / "outputs" / "gainz_paused.flag"
 
 load_dotenv(ENV_PATH)
 
@@ -462,6 +463,58 @@ def submit_practice_sell(symbol, quantity):
         raise ValueError("Sell quantity must be greater than zero.")
     broker = Trading212Broker(environment="demo")
     return broker.market_order(symbol, -abs(quantity))
+
+
+
+def gainz_is_paused():
+    return PAUSE_PATH.exists()
+
+
+def set_gainz_paused(paused):
+    PAUSE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    if paused:
+        PAUSE_PATH.write_text("PAUSED", encoding="utf-8")
+    elif PAUSE_PATH.exists():
+        PAUSE_PATH.unlink()
+
+
+def submit_practice_sell_all(raw_positions):
+    """Submit sell orders for every open Trading 212 Practice position."""
+    broker = Trading212Broker(environment="demo")
+    results = []
+
+    for position in raw_positions:
+        symbol = extract_position_symbol(position)
+        available = float_value(
+            position.get(
+                "quantityAvailableForTrading",
+                position.get("quantity", 0),
+            )
+        )
+
+        if symbol == "Unknown" or available <= 0:
+            continue
+
+        try:
+            result = broker.market_order(symbol, -abs(available))
+            results.append({
+                "symbol": symbol,
+                "quantity": available,
+                "status": str(getattr(result, "status", "SUBMITTED")),
+                "order_id": getattr(result, "order_id", None),
+                "message": str(getattr(result, "message", "")),
+            })
+        except Exception as exc:
+            results.append({
+                "symbol": symbol,
+                "quantity": available,
+                "status": "ERROR",
+                "order_id": None,
+                "message": str(exc),
+            })
+            break
+
+    return results
 
 
 # ============================================================
@@ -1465,6 +1518,137 @@ with st.expander(
         st.success(
             "No pending broker orders."
         )
+
+
+
+# ============================================================
+# MASTER SAFETY CONTROLS — PRACTICE ONLY
+# ============================================================
+
+st.divider()
+st.subheader("🛑 GainZ Master Controls")
+
+paused = gainz_is_paused()
+
+if paused:
+    st.warning(
+        "GainZ is PAUSED on this dashboard instance. Manual Practice selling "
+        "remains available, but automatic execution must also check this pause "
+        "flag before it can be relied on as a cross-system lock."
+    )
+else:
+    st.success("GainZ dashboard pause is currently OFF.")
+
+m1, m2 = st.columns(2)
+
+with m1:
+    if not paused:
+        if st.button(
+            "⏸️ Pause GainZ",
+            use_container_width=True,
+            disabled=preview_mode,
+        ):
+            set_gainz_paused(True)
+            st.success("GainZ dashboard pause enabled.")
+            st.rerun()
+    else:
+        if st.button(
+            "▶️ Resume GainZ",
+            use_container_width=True,
+            disabled=preview_mode,
+        ):
+            set_gainz_paused(False)
+            st.success("GainZ dashboard pause removed.")
+            st.rerun()
+
+with m2:
+    st.metric(
+        "Automation State",
+        "PAUSED" if paused else "ACTIVE",
+    )
+
+st.caption(
+    "Important: Render and GitHub Actions run separately. This dashboard pause "
+    "is not yet a guaranteed GitHub Actions kill-switch. Do not rely on it to "
+    "block scheduled orders until we add a shared persistent pause state."
+)
+
+st.markdown("#### 🚨 Sell Entire Practice Portfolio")
+
+portfolio_value_for_exit = sum(
+    float_value(
+        (position.get("walletImpact") or {}).get("currentValue")
+    )
+    for position in raw_positions
+)
+
+st.write(
+    f"Open positions: **{len(raw_positions)}**  •  "
+    f"Approx. invested value: **{currency_symbol}{portfolio_value_for_exit:,.2f}**"
+)
+
+sell_all_text = st.text_input(
+    "Type SELL ALL to unlock the full-portfolio exit",
+    key="sell_all_confirmation_text",
+    disabled=preview_mode or not raw_positions or pending_count > 0,
+)
+
+sell_all_ack = st.checkbox(
+    "I understand this will submit SELL orders for every open Trading 212 Practice position.",
+    key="sell_all_ack",
+    disabled=preview_mode or not raw_positions or pending_count > 0,
+)
+
+sell_all_disabled = (
+    preview_mode
+    or not credentials_present()
+    or not raw_positions
+    or pending_count > 0
+    or sell_all_text.strip().upper() != "SELL ALL"
+    or not sell_all_ack
+)
+
+if st.button(
+    "🚨 Close All Practice Positions",
+    type="primary",
+    use_container_width=True,
+    disabled=sell_all_disabled,
+):
+    # Pause locally before submitting the exit.
+    set_gainz_paused(True)
+
+    with st.spinner("Submitting Practice sell orders for all open positions..."):
+        results = submit_practice_sell_all(raw_positions)
+
+    if not results:
+        st.warning("No sellable Practice positions were found.")
+    else:
+        result_df = pd.DataFrame(results)
+        st.dataframe(result_df, use_container_width=True, hide_index=True)
+
+        failed = result_df[
+            result_df["status"].str.upper().isin(
+                ["REJECTED", "FAILED", "ERROR"]
+            )
+        ]
+
+        if failed.empty:
+            st.success(
+                "All available Practice sell orders were submitted. "
+                "GainZ dashboard pause has been enabled."
+            )
+        else:
+            st.error(
+                "At least one sell did not submit successfully. "
+                "Do not retry blindly; review the result table and broker orders first."
+            )
+
+        st.cache_data.clear()
+
+if pending_count > 0:
+    st.warning(
+        "Full-portfolio exit is disabled while Trading 212 reports pending orders."
+    )
 
 
 # ============================================================
