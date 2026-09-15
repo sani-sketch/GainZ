@@ -39,6 +39,10 @@ class Trading212Broker:
                 "environment must be 'demo' or 'live'"
             )
 
+        # -----------------------------------------------------
+        # LIVE SAFETY LOCK
+        # -----------------------------------------------------
+
         if (
             environment == "live"
             and os.getenv("GAINZ_ENABLE_LIVE") != "YES"
@@ -92,7 +96,10 @@ class Trading212Broker:
 
         if payload is not None:
             headers["Content-Type"] = "application/json"
-            data = json.dumps(payload).encode()
+
+            data = json.dumps(
+                payload
+            ).encode()
 
         request = urllib.request.Request(
             self.base + path,
@@ -106,6 +113,7 @@ class Trading212Broker:
                 request,
                 timeout=20,
             ) as response:
+
                 body = response.read().decode()
 
                 if not body:
@@ -141,8 +149,12 @@ class Trading212Broker:
     # INSTRUMENT METADATA
     # =========================================================
 
-    def _instruments(self) -> dict[str, str]:
+    def _instruments(
+        self,
+    ) -> dict[str, str]:
+
         if self._instrument_map is None:
+
             raw = self._request(
                 "GET",
                 "/equity/metadata/instruments",
@@ -157,6 +169,7 @@ class Trading212Broker:
             mapping = {}
 
             for item in items or []:
+
                 ticker = str(
                     item.get(
                         "ticker",
@@ -184,10 +197,13 @@ class Trading212Broker:
         self,
         symbol: str,
     ) -> str:
+
         symbol = symbol.upper()
 
         try:
-            return self._instruments()[symbol]
+            return self._instruments()[
+                symbol
+            ]
 
         except KeyError as exc:
             raise Trading212Error(
@@ -199,7 +215,10 @@ class Trading212Broker:
     # POSITIONS
     # =========================================================
 
-    def positions(self) -> list[Position]:
+    def positions(
+        self,
+    ) -> list[Position]:
+
         raw = self._request(
             "GET",
             "/equity/positions",
@@ -214,18 +233,39 @@ class Trading212Broker:
         output = []
 
         for position in items or []:
-            ticker = str(
-                position.get(
-                    "ticker",
-                    "",
-                )
+
+            # Trading 212 currently returns the ticker
+            # inside the nested instrument object.
+
+            instrument = position.get(
+                "instrument",
+                {},
             )
+
+            if isinstance(
+                instrument,
+                dict,
+            ):
+                ticker = str(
+                    instrument.get(
+                        "ticker",
+                        "",
+                    )
+                )
+            else:
+                ticker = ""
 
             symbol = (
                 ticker
                 .split("_")[0]
                 .upper()
             )
+
+            if not symbol:
+                raise Trading212Error(
+                    "Could not determine symbol "
+                    f"from Trading 212 position: {position}"
+                )
 
             quantity = float(
                 position.get(
@@ -235,35 +275,70 @@ class Trading212Broker:
                 or 0.0
             )
 
+            # Trading 212's currentPrice is the
+            # instrument price, e.g. USD for US stocks.
+
             price = float(
                 position.get(
                     "currentPrice",
-                    position.get(
-                        "averagePrice",
-                        0.0,
-                    ),
+                    0.0,
                 )
                 or 0.0
             )
+
+            # walletImpact gives us the value in the
+            # Trading 212 account wallet currency.
+            #
+            # For your current Practice account,
+            # this is GBP.
+
+            wallet_impact = position.get(
+                "walletImpact",
+                {},
+            )
+
+            if isinstance(
+                wallet_impact,
+                dict,
+            ):
+                market_value = float(
+                    wallet_impact.get(
+                        "currentValue",
+                        0.0,
+                    )
+                    or 0.0
+                )
+            else:
+                market_value = 0.0
 
             output.append(
                 Position(
                     symbol,
                     quantity,
                     price,
-                    quantity * price,
+                    market_value,
                 )
             )
 
         return output
 
-    def raw_positions(self) -> list[dict]:
+    # =========================================================
+    # RAW POSITIONS
+    # =========================================================
+
+    def raw_positions(
+        self,
+    ) -> list[dict]:
+
         raw = self._request(
             "GET",
             "/equity/positions",
         )
 
-        if isinstance(raw, dict):
+        if isinstance(
+            raw,
+            dict,
+        ):
             return raw.get(
                 "items",
                 [],
@@ -275,17 +350,26 @@ class Trading212Broker:
     # PENDING / ACTIVE ORDERS
     # =========================================================
 
-    def orders(self) -> list[dict]:
+    def orders(
+        self,
+    ) -> list[dict]:
+
         raw = self._request(
             "GET",
             "/equity/orders",
         )
 
-        if isinstance(raw, dict):
-            return raw.get(
-                "items",
-                [],
-            ) or []
+        if isinstance(
+            raw,
+            dict,
+        ):
+            return (
+                raw.get(
+                    "items",
+                    [],
+                )
+                or []
+            )
 
         return raw or []
 
@@ -298,6 +382,7 @@ class Trading212Broker:
         symbol: str,
         quantity: float,
     ) -> OrderResult:
+
         ticker = self.broker_ticker(
             symbol
         )
@@ -311,6 +396,7 @@ class Trading212Broker:
         #
         # In DEMO mode only, retry progressively lower
         # decimal precision on precision-specific errors.
+
         precisions = [
             4,
             3,
@@ -322,6 +408,7 @@ class Trading212Broker:
         last_error = None
 
         for precision in precisions:
+
             rounded_quantity = round(
                 original_quantity,
                 precision,
@@ -344,10 +431,17 @@ class Trading212Broker:
 
                 order_id = None
 
-                if isinstance(raw, dict):
-                    if raw.get("id") is not None:
+                if isinstance(
+                    raw,
+                    dict,
+                ):
+                    if raw.get(
+                        "id"
+                    ) is not None:
                         order_id = str(
-                            raw.get("id")
+                            raw.get(
+                                "id"
+                            )
                         )
 
                 return OrderResult(
@@ -363,14 +457,20 @@ class Trading212Broker:
                 )
 
             except Trading212Error as exc:
+
                 last_error = exc
-                error_text = str(exc)
+                error_text = str(
+                    exc
+                )
 
                 if (
                     "quantity-precision-mismatch"
                     not in error_text
                 ):
                     raise
+
+                # Precision retry is deliberately
+                # restricted to DEMO mode.
 
                 if self.environment != "demo":
                     raise
