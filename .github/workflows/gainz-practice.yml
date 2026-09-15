@@ -24,18 +24,84 @@ jobs:
       TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
 
     steps:
+      # ---------------------------------------------------------
+      # 1. CHECKOUT
+      # ---------------------------------------------------------
+
       - name: Checkout GainZ
         uses: actions/checkout@v5
+
+      # ---------------------------------------------------------
+      # 2. PYTHON
+      # ---------------------------------------------------------
 
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
+      # ---------------------------------------------------------
+      # 3. DEPENDENCIES
+      # ---------------------------------------------------------
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+
+      # ---------------------------------------------------------
+      # 4. DOWNLOAD FRESH MARKET DATA
+      # ---------------------------------------------------------
+
+      - name: Download latest market data
+        run: |
+          echo "Downloading latest market data from Yahoo Finance..."
+          python data/download_prices.py
+
+      # ---------------------------------------------------------
+      # 5. VERIFY CRITICAL MARKET DATA
+      # ---------------------------------------------------------
+
+      - name: Verify market data
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          data_dir = Path("data")
+
+          required_files = [
+              "AAPL_daily.csv",
+              "SPY_daily.csv",
+          ]
+
+          missing = [
+              name
+              for name in required_files
+              if not (data_dir / name).exists()
+          ]
+
+          if missing:
+              raise RuntimeError(
+                  f"Required market data missing: {missing}"
+              )
+
+          csv_files = list(
+              data_dir.glob("*_daily.csv")
+          )
+
+          print(
+              f"Market data ready: "
+              f"{len(csv_files)} CSV files"
+          )
+
+          print(
+              "AAPL and SPY data verified successfully."
+          )
+          PY
+
+      # ---------------------------------------------------------
+      # 6. CHECK NYSE + CORRECT EXECUTION WINDOW
+      # ---------------------------------------------------------
 
       - name: Check market and correct time
         id: market_check
@@ -94,6 +160,7 @@ jobs:
               os.environ["GITHUB_OUTPUT"],
               "a",
           ) as f:
+
               f.write(
                   "market_day="
                   + (
@@ -125,6 +192,10 @@ jobs:
               )
           PY
 
+      # ---------------------------------------------------------
+      # 7. CHECK FOR EXISTING PRACTICE ORDERS
+      # ---------------------------------------------------------
+
       - name: Check pending Practice orders
         if: steps.market_check.outputs.should_run == 'true'
         id: pending_check
@@ -150,6 +221,7 @@ jobs:
               os.environ["GITHUB_OUTPUT"],
               "a",
           ) as f:
+
               f.write(
                   "pending_count="
                   + str(pending_count)
@@ -167,6 +239,10 @@ jobs:
               )
           PY
 
+      # ---------------------------------------------------------
+      # 8. EXECUTE GAINZ PRACTICE REBALANCE
+      # ---------------------------------------------------------
+
       - name: Execute GainZ Practice orders
         if: >
           steps.market_check.outputs.should_run == 'true' &&
@@ -175,6 +251,10 @@ jobs:
         run: |
           python run_trading212.py --execute-demo
 
+      # ---------------------------------------------------------
+      # 9. SKIP IF ORDERS ARE ALREADY PENDING
+      # ---------------------------------------------------------
+
       - name: Skip because pending orders exist
         if: >
           steps.market_check.outputs.should_run == 'true' &&
@@ -182,10 +262,18 @@ jobs:
         run: |
           echo "GainZ skipped because pending Practice orders already exist."
 
+      # ---------------------------------------------------------
+      # 10. SKIP WRONG TIME / CLOSED MARKET
+      # ---------------------------------------------------------
+
       - name: Skip because market is closed or wrong time slot
         if: steps.market_check.outputs.should_run != 'true'
         run: |
           echo "GainZ skipped because NYSE is closed or this is not the correct trading window."
+
+      # ---------------------------------------------------------
+      # 11. TELEGRAM - EXECUTED
+      # ---------------------------------------------------------
 
       - name: Send executed notification
         if: >
@@ -201,6 +289,10 @@ jobs:
               mode="GAINZ",
           )
           PY
+
+      # ---------------------------------------------------------
+      # 12. TELEGRAM - PENDING ORDER SKIP
+      # ---------------------------------------------------------
 
       - name: Send pending-orders skipped notification
         if: >
@@ -220,6 +312,10 @@ jobs:
           )
           PY
 
+      # ---------------------------------------------------------
+      # 13. TELEGRAM - MARKET CLOSED / WRONG SLOT
+      # ---------------------------------------------------------
+
       - name: Send market-closed skipped notification
         if: >
           success() &&
@@ -236,6 +332,10 @@ jobs:
               ),
           )
           PY
+
+      # ---------------------------------------------------------
+      # 14. TELEGRAM - FAILURE
+      # ---------------------------------------------------------
 
       - name: Send failure notification
         if: failure()
