@@ -1,0 +1,156 @@
+{
+  "timestamp_utc": "2026-09-16T19:33:26.444121+00:00",
+  "universe_size": 15,
+  "stocks": {
+    "AMD": {
+      "sentiment_score": 0.3253902135362559,
+      "sentiment_label": "POSITIVE",
+      "confidence_score": 0.8337210282390719,
+      "confidence_label": "HIGH",
+      "article_count": 10,
+      "coverage_score": 1.0,
+      "average_relevance": 0.795,
+      "average_recency": 0.6218841129562878
+    },
+    "MU": {
+      "sentiment_score": -0.1712431821952235,
+      "sentiment_label": "NEUTRAL",
+      "confidence_score": 0.896774883327186,
+      "confidence_label": "HIGH",
+      "article_count": 10,
+      "coverage_score": 1.0,
+      "average_relevance": 0.8099999999999999,
+      "average_recency": 0.8530995333087441
+    },
+    "MPC": {
+      "sentiment_score": 0.5171630009903436,
+      "sentiment_label": "POSITIVE",
+      "confidence_score": 0.638267736377586,
+      "confidence_label": "MEDIUM",
+      "article_count": 7,
+      "coverage_score": 0.7,
+      "average_relevance": 0.8214285714285714,
+      "average_recency": 0.28307094551034445
+    },
+    "PANW": {
+      "sentiment_score": 0.556993853094079,
+      "sentiment_label": "POSITIVE",
+      "confidence_score": 0.7468146508171563,
+      "confidence_label": "MEDIUM",
+      "article_count": 10,
+      "coverage_score": 1.0,
+      "average_relevance": 0.705,
+      "average_recency": 0.4002586032686251
+    },
+    "FTNT": {
+      "sentiment_score": 0.5182252435400007,
+      "sentiment_label": "POSITIVE",
+      "confidence_score": 0.759749407774778,
+      "confidence_label": "HIGH",
+      "article_count": 10,
+      "coverage_score": 1.0,
+      "average_relevance": 0.73,
+      "average_recency": 0.41699763109911203
+    },
+    "PSX": {
+      "sentiment_score": 0.5821272741063257,
+      "sentiment_label": "POSITIVE",
+      "confidence_score": 0.6956882403266869,
+      "confidence_label": "MEDIUM",
+      "article_count": 8,
+      "coverage_score": 0.8,
+      "average_relevance": 0.8125,
+      "average_recency": 0.36525296130674706
+    },
+    "INTC": {
+      "sentiment_score": 0.29757112842835565,
+      "sentiment_label": "POSITIVE",
+      "confidence_score": 0.898812963819617,
+      "confidence_label": "HIGH",
+      "article_count": 10,
+      "coverage_score": 1.0,
+      "average_relevance": 0.7849999999999999,
+      "average_recency": 0.8962518552784677
+    },
+    "STT": {
+      "sentiment_score": 0.4614367238075261,
+      "sentiment_label": "POSITIVE",
+      "confidence_score": 0.48789567075014983,
+      "confidence_label": "LOW",
+      "article_count": 3,
+      "coverage_score": 0.3,
+      "average_relevance": 0.9333333333333332,
+      "average_recency": 0.16491601633393285
+    },
+    "CRM": {
+      "sentiment_score": -0.3294452216223672,
+      "sentiment_label": "NEGATIVE",
+      "confidence_score": 0.8957714603172432,
+      "confidence_label": "HIGH",
+      "article_count": 10,
+      "coverage_score": 1.0,
+      "average_relevance": 0.7849999999999999,
+      "average_recency": 0.8840858412689728
+    },
+    "MRK": {
+      "sentiment_score": 0.18960851592514996,
+      "sentiment_label": "NEUTRAL",
+      "confidence_score": 0.7846816207387721,
+      "confidence_label": "HIGH",
+      "article_count": 10,
+      "coverage_score": 1.0,
+      "average_relevance": 0.86,
+      "average_recency": 0.334726482955088
+    },
+    "BAC": {
+      "sentiment_score": -0.1039248311491811,
+      "sentiment_label": "NEUTRAL",
+      "confidence_score": 0.8270805359231171,
+      "confidence_label": "HIGH",
+      "article_count": 10,
+      "coverage_score": 1.0,
+      "average_relevance": 0.7849999999999999,
+      "average_recency": 0.6093221436924687
+    },
+    "TMO": {
+      "sentiment_score": 0.4132204524643874,
+      "sentiment_label": "POSITIVE",
+      "confidence_score": 0.7514955463367388,
+      "confidence_label": "HIGH",
+      "article_count": 9,
+      "coverage_score": 0.9,
+      "average_relevance": 0.8444444444444444,
+      "average_recency": 0.38375996312473293
+    },
+    "MS": {
+      "sentiment_score": 0.29311847098195265,
+      "sentiment_label": "POSITIVE",
+      "confidence_score": 0.8721303175050718,
+      "confidence_label": "HIGH",
+      "article_count": 10,
+      "coverage_score": 1.0,
+      "average_relevance": 0.885,
+      "average_recency": 0.6495212700202871
+    },
+    "ADP": {
+      "sentiment_score": 0.0,
+      "sentiment_label": "NEUTRAL",
+      "confidence_score": 0.0,
+      "confidence_label": "LOW",
+      "article_count": 0,
+      "coverage_score": 0.0,
+      "average_relevance": 0.0,
+      "average_recency": 0.0
+    },
+    "UNH": {
+      "sentiment_score": 0.1492798066484706,
+      "sentiment_label": "NEUTRAL",
+      "confidence_score": 0.7736440237271325,
+      "confidence_label": "HIGH",
+      "article_count": 10,
+      "coverage_score": 1.0,
+      "average_relevance": 0.77,
+      "average_recency": 0.4165760949085298
+    }
+  }
+}

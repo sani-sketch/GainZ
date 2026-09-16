@@ -14,6 +14,7 @@ def _load_model():
     """
     Load FinBERT once and reuse it.
     """
+
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
 
     model = AutoModelForSequenceClassification.from_pretrained(
@@ -29,17 +30,7 @@ def score_text(text: str) -> dict:
     """
     Score financial sentiment.
 
-    Returns approximately:
-
-    {
-        "positive": 0.82,
-        "negative": 0.06,
-        "neutral": 0.12,
-        "score": 0.76,
-        "label": "POSITIVE"
-    }
-
-    score ranges from -1 to +1.
+    Score ranges approximately from -1 to +1.
     """
 
     text = str(text or "").strip()
@@ -89,8 +80,10 @@ def score_text(text: str) -> dict:
 
     if score >= 0.25:
         label = "POSITIVE"
+
     elif score <= -0.25:
         label = "NEGATIVE"
+
     else:
         label = "NEUTRAL"
 
@@ -101,3 +94,12 @@ def score_text(text: str) -> dict:
         "score": score,
         "label": label,
     }
+
+
+if __name__ == "__main__":
+
+    test = score_text(
+        "AMD raises revenue guidance after stronger than expected demand for AI chips."
+    )
+
+    print(test)
