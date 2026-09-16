@@ -113,6 +113,14 @@ jobs:
 
       # =========================================================
       # 6. CHECK NYSE + CORRECT SIGNAL WINDOW
+      #
+      # Scheduled runs:
+      #   Must be an NYSE trading day AND within the
+      #   intended 09:35-09:59 New York window.
+      #
+      # Manual workflow_dispatch runs:
+      #   Allowed immediately so the cloud pipeline
+      #   can be tested at any time.
       # =========================================================
 
       - name: Check market and correct time
@@ -144,9 +152,17 @@ jobs:
               and 35 <= now.minute <= 59
           )
 
+          manual_run = (
+              os.getenv("GITHUB_EVENT_NAME")
+              == "workflow_dispatch"
+          )
+
           should_run = (
-              market_day
-              and correct_time
+              manual_run
+              or (
+                  market_day
+                  and correct_time
+              )
           )
 
 
@@ -163,6 +179,11 @@ jobs:
           print(
               "Correct signal window:",
               correct_time,
+          )
+
+          print(
+              "Manual GitHub run:",
+              manual_run,
           )
 
           print(
@@ -197,6 +218,16 @@ jobs:
               )
 
               f.write(
+                  "manual_run="
+                  + (
+                      "true"
+                      if manual_run
+                      else "false"
+                  )
+                  + "\n"
+              )
+
+              f.write(
                   "should_run="
                   + (
                       "true"
@@ -211,13 +242,18 @@ jobs:
       # =========================================================
       # 7. GENERATE GAINZ SIGNALS
       #
-      # IMPORTANT:
+      # SIGNAL ONLY.
       #
-      # No --execute-demo flag.
+      # There is deliberately NO --execute-demo flag.
       #
-      # Therefore run_trading212.py operates in DRY RUN mode.
-      # It generates the rebalance plan and sends the plan
-      # to Telegram, but does NOT submit Trading 212 orders.
+      # run_trading212.py:
+      #   - reads the Practice account
+      #   - generates target weights
+      #   - builds BUY/SELL plan
+      #   - sends the plan to Telegram
+      #   - dry-runs execution
+      #
+      # It does NOT submit Trading 212 orders.
       # =========================================================
 
       - name: Generate GainZ signals
@@ -227,13 +263,13 @@ jobs:
 
 
       # =========================================================
-      # 8. MARKET CLOSED / WRONG SLOT
+      # 8. SKIP CLOSED MARKET / WRONG SCHEDULED SLOT
       # =========================================================
 
       - name: Skip because market is closed or wrong time slot
         if: steps.market_check.outputs.should_run != 'true'
         run: |
-          echo "GainZ signal generation skipped because NYSE is closed or this is not the correct signal window."
+          echo "GainZ signal generation skipped because NYSE is closed or this is not the correct scheduled signal window."
 
 
       # =========================================================
@@ -248,7 +284,7 @@ jobs:
 
           send_telegram_message(
               "🚨 GAINZ AUTOMATION FAILED\n\n"
-              "GainZ could not generate today's signals.\n"
+              "GainZ could not generate the signals.\n"
               "Open GitHub Actions to check the logs.\n\n"
               "No live trade was executed."
           )
