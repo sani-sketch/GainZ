@@ -35,6 +35,13 @@ def build_rebalance_orders(
     New US positions:
         Yahoo USD/share is converted to GBP/share using usd_to_gbp.
 
+    Rebalance threshold:
+        Ignore small adjustments below the greater of:
+        - min_order_value
+        - 0.5% of total portfolio equity
+
+    Full exits are always allowed.
+
     Orders are returned SELL first, BUY second.
     """
 
@@ -69,6 +76,15 @@ def build_rebalance_orders(
     equity = float(cash) + current_invested_value
 
     investable = equity * (1.0 - cash_buffer)
+
+    # ---------------------------------------------------------
+    # Dynamic rebalance threshold
+    # ---------------------------------------------------------
+
+    dynamic_min_order_value = max(
+        float(min_order_value),
+        equity * 0.005,
+    )
 
     # ---------------------------------------------------------
     # Symbols requiring rebalance
@@ -175,10 +191,32 @@ def build_rebalance_orders(
             delta_qty * account_price_per_share
         )
 
-        # Ignore tiny adjustments
+        # -----------------------------------------------------
+        # Full exit detection
+        # -----------------------------------------------------
 
-        if estimated_value < min_order_value:
+        is_full_exit = (
+            position is not None
+            and current_qty > 0
+            and target_weight == 0
+        )
+
+        # -----------------------------------------------------
+        # Ignore insignificant rebalances
+        #
+        # Full exits bypass the threshold so GainZ does not
+        # leave unwanted residual positions behind.
+        # -----------------------------------------------------
+
+        if (
+            not is_full_exit
+            and estimated_value < dynamic_min_order_value
+        ):
             continue
+
+        # -----------------------------------------------------
+        # BUY / SELL
+        # -----------------------------------------------------
 
         side = (
             "BUY"
