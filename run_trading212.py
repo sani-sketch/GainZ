@@ -3,9 +3,11 @@
 Examples:
   python run_trading212.py
       # demo account, read + plan only
+      # Telegram signals are sent
 
   python run_trading212.py --execute-demo
       # sends DEMO orders
+      # Telegram signals are sent
 
 Live mode is intentionally not exposed as a CLI switch.
 """
@@ -23,6 +25,7 @@ from live.signal import adaptive_target
 from broker.trading212 import Trading212Broker
 from execution.planner import build_rebalance_orders
 from execution.engine import execute_orders
+from notifications.telegram import send_telegram_message
 
 
 ROOT = Path(__file__).resolve().parent
@@ -104,8 +107,6 @@ def get_usd_to_gbp_rate() -> float:
             "GBP/USD FX data contains no closing price."
         )
 
-    # yfinance may return either a Series or
-    # a one-column DataFrame depending on version.
     if isinstance(close, pd.DataFrame):
         gbp_usd = float(close.iloc[-1, 0])
     else:
@@ -118,13 +119,117 @@ def get_usd_to_gbp_rate() -> float:
 
     usd_to_gbp = 1.0 / gbp_usd
 
-    # Sanity guard against accidentally inverted/bad FX data.
     if not 0.50 < usd_to_gbp < 1.20:
         raise RuntimeError(
             f"Suspicious USD->GBP rate: {usd_to_gbp:.6f}"
         )
 
     return usd_to_gbp
+
+
+# ============================================================
+# TELEGRAM SIGNALS
+# ============================================================
+
+def send_order_plan_to_telegram(
+    orders,
+    execute_demo: bool,
+):
+    """
+    Send the GainZ rebalance plan to Telegram.
+
+    Notification only.
+    This function never executes trades.
+    """
+
+    if not orders:
+        send_telegram_message(
+            "⚪ GAINZ UPDATE\n\n"
+            "No BUY or SELL signals today.\n"
+            "Portfolio already matches the current GainZ plan."
+        )
+        return
+
+    mode = (
+        "PRACTICE EXECUTION"
+        if execute_demo
+        else "SIGNAL ONLY"
+    )
+
+    lines = [
+        "📊 GAINZ ALPHA",
+        "",
+        f"Mode: {mode}",
+        "",
+    ]
+
+    sells = []
+    buys = []
+
+    for order in orders:
+
+        quantity = float(
+            getattr(order, "quantity", 0.0)
+        )
+
+        symbol = str(
+            getattr(
+                order,
+                "ticker",
+                getattr(order, "symbol", "UNKNOWN"),
+            )
+        )
+
+        if quantity < 0:
+            sells.append(
+                (
+                    symbol,
+                    abs(quantity),
+                )
+            )
+
+        elif quantity > 0:
+            buys.append(
+                (
+                    symbol,
+                    quantity,
+                )
+            )
+
+    if sells:
+        lines.append("🔴 SELL")
+
+        for symbol, quantity in sells:
+            lines.append(
+                f"{symbol}: {quantity:.6f} shares"
+            )
+
+        lines.append("")
+
+    if buys:
+        lines.append("🟢 BUY")
+
+        for symbol, quantity in buys:
+            lines.append(
+                f"{symbol}: {quantity:.6f} shares"
+            )
+
+        lines.append("")
+
+    lines.extend(
+        [
+            f"Total signals: {len(orders)}",
+            "",
+            (
+                "Review in Trading 212 before "
+                "placing any manual trade."
+            ),
+        ]
+    )
+
+    send_telegram_message(
+        "\n".join(lines)
+    )
 
 
 # ============================================================
@@ -245,6 +350,19 @@ def main():
         prices=prices,
         min_order_value=1.0,
         usd_to_gbp=usd_to_gbp,
+    )
+
+    # --------------------------------------------------------
+    # TELEGRAM
+    #
+    # IMPORTANT:
+    # Telegram receives the PLAN.
+    # It does not execute anything.
+    # --------------------------------------------------------
+
+    send_order_plan_to_telegram(
+        orders,
+        execute_demo=args.execute_demo,
     )
 
     # --------------------------------------------------------

@@ -1,4 +1,4 @@
-name: GainZ Practice Automation
+name: GainZ Signal Automation
 
 on:
   workflow_dispatch:
@@ -10,57 +10,68 @@ on:
     # 09:40 New York during standard time
     - cron: "40 14 * * 1-5"
 
+
 permissions:
   contents: read
 
+
 jobs:
-  gainz-practice:
+
+  gainz-signals:
+
     runs-on: ubuntu-latest
 
     env:
       TRADING212_API_KEY: ${{ secrets.TRADING212_API_KEY }}
       TRADING212_API_SECRET: ${{ secrets.TRADING212_API_SECRET }}
+
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
 
+
     steps:
-      # ---------------------------------------------------------
+
+      # =========================================================
       # 1. CHECKOUT
-      # ---------------------------------------------------------
+      # =========================================================
 
       - name: Checkout GainZ
         uses: actions/checkout@v5
 
-      # ---------------------------------------------------------
+
+      # =========================================================
       # 2. PYTHON
-      # ---------------------------------------------------------
+      # =========================================================
 
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
-      # ---------------------------------------------------------
+
+      # =========================================================
       # 3. DEPENDENCIES
-      # ---------------------------------------------------------
+      # =========================================================
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      # ---------------------------------------------------------
+
+      # =========================================================
       # 4. DOWNLOAD FRESH MARKET DATA
-      # ---------------------------------------------------------
+      # =========================================================
 
       - name: Download latest market data
         run: |
           echo "Downloading latest market data from Yahoo Finance..."
           python data/download_prices.py
 
-      # ---------------------------------------------------------
+
+      # =========================================================
       # 5. VERIFY CRITICAL MARKET DATA
-      # ---------------------------------------------------------
+      # =========================================================
 
       - name: Verify market data
         run: |
@@ -99,9 +110,10 @@ jobs:
           )
           PY
 
-      # ---------------------------------------------------------
-      # 6. CHECK NYSE + CORRECT EXECUTION WINDOW
-      # ---------------------------------------------------------
+
+      # =========================================================
+      # 6. CHECK NYSE + CORRECT SIGNAL WINDOW
+      # =========================================================
 
       - name: Check market and correct time
         id: market_check
@@ -112,6 +124,7 @@ jobs:
           from zoneinfo import ZoneInfo
 
           import pandas_market_calendars as mcal
+
 
           now = datetime.now(
               ZoneInfo("America/New_York")
@@ -136,6 +149,7 @@ jobs:
               and correct_time
           )
 
+
           print(
               "New York time:",
               now,
@@ -147,14 +161,15 @@ jobs:
           )
 
           print(
-              "Correct execution window:",
+              "Correct signal window:",
               correct_time,
           )
 
           print(
-              "Should execute:",
+              "Should generate GainZ signals:",
               should_run,
           )
+
 
           with open(
               os.environ["GITHUB_OUTPUT"],
@@ -192,162 +207,49 @@ jobs:
               )
           PY
 
-      # ---------------------------------------------------------
-      # 7. CHECK FOR EXISTING PRACTICE ORDERS
-      # ---------------------------------------------------------
 
-      - name: Check pending Practice orders
+      # =========================================================
+      # 7. GENERATE GAINZ SIGNALS
+      #
+      # IMPORTANT:
+      #
+      # No --execute-demo flag.
+      #
+      # Therefore run_trading212.py operates in DRY RUN mode.
+      # It generates the rebalance plan and sends the plan
+      # to Telegram, but does NOT submit Trading 212 orders.
+      # =========================================================
+
+      - name: Generate GainZ signals
         if: steps.market_check.outputs.should_run == 'true'
-        id: pending_check
         run: |
-          python - <<'PY'
-          import os
+          python run_trading212.py
 
-          from broker.trading212 import Trading212Broker
 
-          broker = Trading212Broker(
-              environment="demo"
-          )
-
-          orders = broker.orders()
-
-          pending_count = len(orders)
-
-          print(
-              f"Pending orders: {pending_count}"
-          )
-
-          with open(
-              os.environ["GITHUB_OUTPUT"],
-              "a",
-          ) as f:
-
-              f.write(
-                  "pending_count="
-                  + str(pending_count)
-                  + "\n"
-              )
-
-              f.write(
-                  "can_trade="
-                  + (
-                      "true"
-                      if pending_count == 0
-                      else "false"
-                  )
-                  + "\n"
-              )
-          PY
-
-      # ---------------------------------------------------------
-      # 8. EXECUTE GAINZ PRACTICE REBALANCE
-      # ---------------------------------------------------------
-
-      - name: Execute GainZ Practice orders
-        if: >
-          steps.market_check.outputs.should_run == 'true' &&
-          steps.pending_check.outputs.can_trade == 'true'
-        id: execute_gainz
-        run: |
-          python run_trading212.py --execute-demo
-
-      # ---------------------------------------------------------
-      # 9. SKIP IF ORDERS ARE ALREADY PENDING
-      # ---------------------------------------------------------
-
-      - name: Skip because pending orders exist
-        if: >
-          steps.market_check.outputs.should_run == 'true' &&
-          steps.pending_check.outputs.can_trade != 'true'
-        run: |
-          echo "GainZ skipped because pending Practice orders already exist."
-
-      # ---------------------------------------------------------
-      # 10. SKIP WRONG TIME / CLOSED MARKET
-      # ---------------------------------------------------------
+      # =========================================================
+      # 8. MARKET CLOSED / WRONG SLOT
+      # =========================================================
 
       - name: Skip because market is closed or wrong time slot
         if: steps.market_check.outputs.should_run != 'true'
         run: |
-          echo "GainZ skipped because NYSE is closed or this is not the correct trading window."
+          echo "GainZ signal generation skipped because NYSE is closed or this is not the correct signal window."
 
-      # ---------------------------------------------------------
-      # 11. TELEGRAM - EXECUTED
-      # ---------------------------------------------------------
 
-      - name: Send executed notification
-        if: >
-          success() &&
-          steps.market_check.outputs.should_run == 'true' &&
-          steps.pending_check.outputs.can_trade == 'true'
-        run: |
-          python - <<'PY'
-          from notifications import notify_success
-
-          notify_success(
-              dashboard_url="https://gainz-dashboard.onrender.com/",
-              mode="GAINZ",
-          )
-          PY
-
-      # ---------------------------------------------------------
-      # 12. TELEGRAM - PENDING ORDER SKIP
-      # ---------------------------------------------------------
-
-      - name: Send pending-orders skipped notification
-        if: >
-          success() &&
-          steps.market_check.outputs.should_run == 'true' &&
-          steps.pending_check.outputs.can_trade != 'true'
-        run: |
-          python - <<'PY'
-          from notifications import notify_skipped
-
-          notify_skipped(
-              dashboard_url="https://gainz-dashboard.onrender.com/",
-              reason=(
-                  "Pending Practice orders already exist, "
-                  "so GainZ did not submit duplicate orders."
-              ),
-          )
-          PY
-
-      # ---------------------------------------------------------
-      # 13. TELEGRAM - MARKET CLOSED / WRONG SLOT
-      # ---------------------------------------------------------
-
-      - name: Send market-closed skipped notification
-        if: >
-          success() &&
-          steps.market_check.outputs.should_run != 'true'
-        run: |
-          python - <<'PY'
-          from notifications import notify_skipped
-
-          notify_skipped(
-              dashboard_url="https://gainz-dashboard.onrender.com/",
-              reason=(
-                  "NYSE is closed or this is not the "
-                  "scheduled trading window."
-              ),
-          )
-          PY
-
-      # ---------------------------------------------------------
-      # 14. TELEGRAM - FAILURE
-      # ---------------------------------------------------------
+      # =========================================================
+      # 9. FAILURE NOTIFICATION
+      # =========================================================
 
       - name: Send failure notification
         if: failure()
         run: |
           python - <<'PY'
-          from notifications import notify_failure
+          from notifications.telegram import send_telegram_message
 
-          notify_failure(
-              dashboard_url="https://gainz-dashboard.onrender.com/",
-              error_message=(
-                  "GainZ automation failed. "
-                  "Open GitHub Actions for the full logs."
-              ),
+          send_telegram_message(
+              "🚨 GAINZ AUTOMATION FAILED\n\n"
+              "GainZ could not generate today's signals.\n"
+              "Open GitHub Actions to check the logs.\n\n"
+              "No live trade was executed."
           )
           PY
