@@ -453,19 +453,6 @@ def fetch_with_fallback(
 # MANUAL PRACTICE SELL
 # ============================================================
 
-def submit_practice_sell(symbol, quantity):
-    """Submit a sell to Trading 212 Practice only."""
-    symbol = str(symbol or "").strip().upper()
-    quantity = float_value(quantity)
-    if not symbol:
-        raise ValueError("Missing ticker.")
-    if quantity <= 0:
-        raise ValueError("Sell quantity must be greater than zero.")
-    broker = Trading212Broker(environment="demo")
-    return broker.market_order(symbol, -abs(quantity))
-
-
-
 def gainz_is_paused():
     return PAUSE_PATH.exists()
 
@@ -1140,130 +1127,6 @@ st.caption(
 
 
 # ============================================================
-# MANUAL PROFIT TAKING — PRACTICE ONLY
-# ============================================================
-
-st.divider()
-st.subheader("💰 Manual Profit Taking")
-
-st.info(
-    "Practice only. Choose a holding, select how much to sell, "
-    "review the quantity and unrealised P/L, then confirm before submitting."
-)
-
-if preview_mode:
-    st.warning("Manual selling is disabled in Preview mode.")
-elif pending_count > 0:
-    st.warning("Manual selling is disabled while Trading 212 has pending orders.")
-elif not credentials_present():
-    st.warning("Trading 212 Practice credentials are not configured.")
-elif raw_positions:
-    sellable_positions = []
-    for position in raw_positions:
-        symbol = extract_position_symbol(position)
-        quantity = float_value(position.get("quantity"))
-        wallet = position.get("walletImpact", {})
-        pnl_gbp = float_value(wallet.get("unrealizedProfitLoss"))
-        value_gbp = float_value(wallet.get("currentValue"))
-        if symbol != "Unknown" and quantity > 0:
-            sellable_positions.append({
-                "symbol": symbol,
-                "quantity": quantity,
-                "pnl_gbp": pnl_gbp,
-                "value_gbp": value_gbp,
-            })
-
-    if sellable_positions:
-        position_map = {item["symbol"]: item for item in sellable_positions}
-        selected_symbol = st.selectbox(
-            "Position", list(position_map.keys()), key="manual_sell_symbol"
-        )
-        selected = position_map[selected_symbol]
-
-        s1, s2, s3 = st.columns(3)
-        s1.metric("Holding", f"{selected['quantity']:.4f} shares")
-        s2.metric("Current Value", f"{currency_symbol}{selected['value_gbp']:,.2f}")
-        s3.metric("Unrealised P/L", f"{currency_symbol}{selected['pnl_gbp']:,.2f}")
-
-        sell_percent = st.radio(
-            "Amount to sell",
-            [25, 50, 100],
-            horizontal=True,
-            format_func=lambda value: f"Sell {value}%",
-            key="manual_sell_percent",
-        )
-
-        sell_quantity = selected["quantity"] * sell_percent / 100.0
-        estimated_value = selected["value_gbp"] * sell_percent / 100.0
-
-        st.write(
-            f"**Order preview:** SELL approximately `{sell_quantity:.6f}` shares "
-            f"of **{selected_symbol}** (about {currency_symbol}{estimated_value:,.2f} "
-            f"at the current Practice valuation)."
-        )
-
-        if selected["pnl_gbp"] > 0:
-            estimated_profit = selected["pnl_gbp"] * sell_percent / 100.0
-            st.caption(
-                f"Approximate share of current unrealised gain being realised: "
-                f"{currency_symbol}{estimated_profit:,.2f}. Actual execution price "
-                f"and realised P/L can differ."
-            )
-        else:
-            st.warning(
-                "This position currently does not show an unrealised profit. "
-                "Selling is still possible after confirmation."
-            )
-
-        manual_sell_confirm = st.checkbox(
-            f"I confirm: SELL {sell_percent}% of {selected_symbol} "
-            f"in Trading 212 Practice",
-            key=f"manual_sell_confirm_{selected_symbol}_{sell_percent}",
-        )
-
-        if st.button(
-            f"🧪 Confirm Practice Sell — {selected_symbol}",
-            type="primary",
-            use_container_width=True,
-            disabled=not manual_sell_confirm,
-            key="manual_sell_submit",
-        ):
-            with st.spinner(f"Submitting Practice SELL for {selected_symbol}..."):
-                try:
-                    result = submit_practice_sell(selected_symbol, sell_quantity)
-                    status = str(getattr(result, "status", "")).upper()
-                    message = str(getattr(result, "message", ""))
-                    order_id = getattr(result, "order_id", None)
-
-                    if status in {"REJECTED", "FAILED", "ERROR"}:
-                        st.error(f"Practice sell failed: {message or status}")
-                    else:
-                        st.success(
-                            f"Practice SELL submitted for {selected_symbol}: "
-                            f"{sell_quantity:.6f} shares."
-                        )
-                        if order_id:
-                            st.caption(f"Broker order ID: {order_id}")
-                        st.warning(
-                            "Important: this manual sale does not change GainZ's "
-                            "strategy target. If GainZ still targets this stock, "
-                            "a later automated rebalance may buy it again."
-                        )
-                        st.cache_data.clear()
-                except Exception as exc:
-                    st.error(f"Practice sell was not submitted: {exc}")
-
-        st.caption(
-            "Safety: this control is hard-coded to Trading 212 Demo/Practice. "
-            "It cannot enable live trading."
-        )
-    else:
-        st.info("No sellable Practice positions were found.")
-else:
-    st.info("No open Practice positions.")
-
-
-# ============================================================
 # ORDERS
 # ============================================================
 
@@ -1532,9 +1395,9 @@ paused = gainz_is_paused()
 
 if paused:
     st.warning(
-        "GainZ is PAUSED on this dashboard instance. Manual Practice selling "
-        "remains available, but automatic execution must also check this pause "
-        "flag before it can be relied on as a cross-system lock."
+        "GainZ is PAUSED on this dashboard instance. Automatic execution "
+        "must also check this pause flag before it can be relied on as a "
+        "cross-system lock."
     )
 else:
     st.success("GainZ dashboard pause is currently OFF.")
