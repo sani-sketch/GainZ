@@ -9,6 +9,11 @@ import html
 import pandas as pd
 import streamlit as st
 from dotenv import load_dotenv
+from portfolio.history import (
+    save_portfolio_snapshot,
+    load_portfolio_history,
+    calculate_daily_performance,
+)
 
 from broker.trading212 import Trading212Broker
 
@@ -1103,6 +1108,19 @@ pending_count = len(
     broker_orders
 )
 
+# ============================================================
+# PORTFOLIO HISTORY
+# ============================================================
+
+if not preview_mode and account and not account_error:
+    save_portfolio_snapshot(
+        portfolio_value=total_account_value,
+        cash=cash_available,
+        invested_value=investment_value,
+        unrealised_pnl=unrealized_ppl,
+        realised_pnl=realized_ppl,
+    )
+
 
 # ============================================================
 # EXPOSURE
@@ -1184,7 +1202,7 @@ st.markdown(f"### {nav_page}")
 
 if nav_page == "Dashboard":
     # ============================================================
-    # DASHBOARD — APPROVED SF ALPHA LAYOUT
+    # DASHBOARD — SF ALPHA
     # ============================================================
 
     d1, d2, d3, d4 = st.columns(4)
@@ -1217,93 +1235,256 @@ if nav_page == "Dashboard":
         open_position_count,
     )
 
+    # ============================================================
+    # PORTFOLIO PERFORMANCE
+    # ============================================================
+
     st.markdown("### Portfolio Performance")
 
     left, right = st.columns([2.55, 1.25])
 
     with left:
         st.markdown(
-            """
-            <div class="sf-perf-shell">
-                <div class="sf-panel-title">Portfolio Performance</div>
-                <div class="sf-perf-empty">
-                    Genuine historical portfolio snapshots will be charted here.<br>
-                    SF Alpha will not fabricate historical returns.
-                </div>
-            </div>
-            """,
+            '<div class="sf-panel-title">Portfolio Performance</div>',
             unsafe_allow_html=True,
         )
 
+        history = load_portfolio_history()
+
+        if history:
+            history_df = pd.DataFrame(history)
+
+            history_df["timestamp"] = pd.to_datetime(
+                history_df["timestamp"],
+                utc=True,
+                errors="coerce",
+            )
+
+            history_df["portfolio_value"] = pd.to_numeric(
+                history_df["portfolio_value"],
+                errors="coerce",
+            )
+
+            history_df = (
+                history_df
+                .dropna(subset=["timestamp", "portfolio_value"])
+                .sort_values("timestamp")
+            )
+
+            if len(history_df) >= 2:
+                chart_df = history_df.set_index("timestamp")[
+                    ["portfolio_value"]
+                ]
+
+                fig, ax = plt.subplots(figsize=(10, 4))
+                fig.patch.set_alpha(0)
+                ax.set_facecolor("none")
+
+                ax.plot(
+                    chart_df.index,
+                    chart_df["portfolio_value"],
+                    linewidth=2,
+                )
+
+                min_value = chart_df["portfolio_value"].min()
+                max_value = chart_df["portfolio_value"].max()
+                movement = max_value - min_value
+
+                padding = max(
+                    movement * 0.35,
+                    max_value * 0.002,
+                    5,
+                )
+
+                ax.set_ylim(
+                    min_value - padding,
+                    max_value + padding,
+                )
+
+                ax.set_ylabel(
+                    f"Portfolio Value ({currency_symbol})"
+                )
+                ax.set_xlabel("")
+                ax.grid(True, alpha=0.12)
+                ax.spines["top"].set_visible(False)
+                ax.spines["right"].set_visible(False)
+
+                fig.autofmt_xdate()
+
+                st.pyplot(
+                    fig,
+                    use_container_width=True,
+                )
+
+                plt.close(fig)
+
+                first_value = history_df["portfolio_value"].iloc[0]
+                latest_value = history_df["portfolio_value"].iloc[-1]
+                change = latest_value - first_value
+
+                change_pct = (
+                    (change / first_value) * 100
+                    if first_value
+                    else 0.0
+                )
+
+                st.caption(
+                    f"Recorded performance: "
+                    f"{currency_symbol}{change:+,.2f} "
+                    f"({change_pct:+.2f}%) • "
+                    f"{len(history_df)} genuine snapshots"
+                )
+
+            else:
+                st.info(
+                    "First genuine portfolio snapshot recorded. "
+                    "The equity curve will appear after another daily snapshot."
+                )
+
+        else:
+            st.info(
+                "Waiting for the first genuine portfolio snapshot."
+            )
+
+    # ============================================================
+    # PORTFOLIO STATS
+    # ============================================================
+
     with right:
         r1, r2 = st.columns(2)
-        r1.metric("Invested", f"{currency_symbol}{investment_value:,.2f}")
-        r2.metric("Exposure", f"{exposure * 100:.1f}%")
-        st.metric("Unrealised P/L", f"{currency_symbol}{unrealized_ppl:+,.2f}")
-        st.metric("Realised P/L", f"{currency_symbol}{realized_ppl:+,.2f}")
+
+        r1.metric(
+            "Invested",
+            f"{currency_symbol}{investment_value:,.2f}",
+        )
+
+        r2.metric(
+            "Exposure",
+            f"{exposure * 100:.1f}%",
+        )
+
+        st.metric(
+            "Unrealised P/L",
+            f"{currency_symbol}{unrealized_ppl:+,.2f}",
+        )
+
+        st.metric(
+            "Realised P/L",
+            f"{currency_symbol}{realized_ppl:+,.2f}",
+        )
+
+    # ============================================================
+    # PORTFOLIO OVERVIEW
+    # ============================================================
 
     st.markdown("### Portfolio Overview")
 
     lower1, lower2, lower3 = st.columns([1.08, 1.42, 1])
 
     with lower1:
-        st.markdown('<div class="sf-panel-title">Portfolio Allocation</div>', unsafe_allow_html=True)
+        st.markdown(
+            '<div class="sf-panel-title">Portfolio Allocation</div>',
+            unsafe_allow_html=True,
+        )
 
         if raw_positions:
             allocation_rows = []
+
             for position in raw_positions:
                 symbol = extract_position_symbol(position)
                 wallet = position.get("walletImpact", {}) or {}
                 value = float_value(wallet.get("currentValue"))
+
                 if value > 0:
-                    allocation_rows.append({"Ticker": symbol, "Value": value})
+                    allocation_rows.append(
+                        {
+                            "Ticker": symbol,
+                            "Value": value,
+                        }
+                    )
 
             allocation_df = pd.DataFrame(allocation_rows)
 
-            if not allocation_df.empty and allocation_df["Value"].sum() > 0:
+            if (
+                not allocation_df.empty
+                and allocation_df["Value"].sum() > 0
+            ):
                 allocation_df["Weight"] = (
-                    allocation_df["Value"] / allocation_df["Value"].sum()
+                    allocation_df["Value"]
+                    / allocation_df["Value"].sum()
                 )
 
-                # Real holdings only. Donut uses current broker position values.
                 fig, ax = plt.subplots(figsize=(4.2, 4.2))
                 fig.patch.set_alpha(0)
                 ax.set_facecolor("none")
+
                 ax.pie(
                     allocation_df["Value"],
                     startangle=90,
-                    wedgeprops={"width": 0.34, "edgecolor": "none"},
+                    wedgeprops={
+                        "width": 0.34,
+                        "edgecolor": "none",
+                    },
                 )
+
                 ax.text(
-                    0, 0.05,
-                    f"{currency_symbol}{investment_value/1000:.2f}K",
-                    ha="center", va="center",
-                    fontsize=14, fontweight="bold",
+                    0,
+                    0.05,
+                    f"{currency_symbol}{investment_value / 1000:.2f}K",
+                    ha="center",
+                    va="center",
+                    fontsize=14,
+                    fontweight="bold",
                 )
+
                 ax.text(
-                    0, -0.12,
+                    0,
+                    -0.12,
                     "INVESTED",
-                    ha="center", va="center",
-                    fontsize=7, alpha=.65,
+                    ha="center",
+                    va="center",
+                    fontsize=7,
+                    alpha=0.65,
                 )
+
                 ax.axis("equal")
-                st.pyplot(fig, use_container_width=True)
+
+                st.pyplot(
+                    fig,
+                    use_container_width=True,
+                )
+
                 plt.close(fig)
 
                 allocation_display = allocation_df.copy()
-                allocation_display["Weight"] = allocation_display["Weight"].map(
+
+                allocation_display["Weight"] = allocation_display[
+                    "Weight"
+                ].map(
                     lambda x: f"{x * 100:.1f}%"
                 )
+
                 st.dataframe(
-                    allocation_display[["Ticker", "Weight"]].head(6),
+                    allocation_display[
+                        ["Ticker", "Weight"]
+                    ].head(6),
                     use_container_width=True,
                     hide_index=True,
                 )
+
+            else:
+                st.caption(
+                    "No portfolio allocation data available."
+                )
+
         else:
             st.caption("No open positions.")
 
     with lower2:
-        st.markdown('<div class="sf-panel-title">Recent Orders</div>', unsafe_allow_html=True)
+        st.markdown(
+            '<div class="sf-panel-title">Recent Orders</div>',
+            unsafe_allow_html=True,
+        )
 
         clean_orders = []
 
@@ -1311,53 +1492,118 @@ if nav_page == "Dashboard":
             for item in broker_orders[:5]:
                 if not isinstance(item, dict):
                     continue
-                clean_orders.append({
-                    "Ticker": symbol_from_ticker(item.get("ticker", "")),
-                    "Side": str(item.get("side", "")).upper(),
-                    "Qty": float_value(item.get("filledQuantity", item.get("quantity", 0))),
-                    "Status": str(item.get("status", "")),
-                })
+
+                clean_orders.append(
+                    {
+                        "Ticker": symbol_from_ticker(
+                            item.get("ticker", "")
+                        ),
+                        "Side": str(
+                            item.get("side", "")
+                        ).upper(),
+                        "Qty": float_value(
+                            item.get(
+                                "filledQuantity",
+                                item.get("quantity", 0),
+                            )
+                        ),
+                        "Status": str(
+                            item.get("status", "")
+                        ),
+                    }
+                )
 
         elif historical_orders:
             clean_orders = [
                 flatten_historical_order(item)
                 for item in historical_orders[:5]
             ]
-            clean_orders = [row for row in clean_orders if row]
+
+            clean_orders = [
+                row
+                for row in clean_orders
+                if row
+            ]
 
         if clean_orders:
             for row in clean_orders:
-                side = str(row.get("Side", "")).upper()
-                badge_class = "sf-badge-sell" if side == "SELL" else "sf-badge-buy"
-                ticker = html.escape(str(row.get("Ticker", "")))
-                qty = row.get("Qty", 0)
-                status = html.escape(str(row.get("Status", "")))
+                side = str(
+                    row.get("Side", "")
+                ).upper()
+
+                badge_class = (
+                    "sf-badge-sell"
+                    if side == "SELL"
+                    else "sf-badge-buy"
+                )
+
+                ticker = html.escape(
+                    str(row.get("Ticker", ""))
+                )
+
+                qty = float_value(
+                    row.get("Qty", 0)
+                )
+
+                status = html.escape(
+                    str(row.get("Status", ""))
+                )
+
                 st.markdown(
                     f"""
                     <div class="sf-order-row">
-                        <span class="{badge_class}">{html.escape(side or "—")}</span>
-                        <span><strong>{ticker}</strong></span>
+                        <span class="{badge_class}">
+                            {html.escape(side or "—")}
+                        </span>
+                        <span>
+                            <strong>{ticker}</strong>
+                        </span>
                         <span>{qty:g}</span>
-                        <span class="sf-green">{status}</span>
+                        <span class="sf-green">
+                            {status}
+                        </span>
                     </div>
                     """,
                     unsafe_allow_html=True,
                 )
+
         else:
-            st.caption("No recent broker orders available.")
+            st.caption(
+                "No recent broker orders available."
+            )
 
     with lower3:
-        st.markdown('<div class="sf-panel-title">System Status</div>', unsafe_allow_html=True)
+        st.markdown(
+            '<div class="sf-panel-title">System Status</div>',
+            unsafe_allow_html=True,
+        )
 
         statuses = [
-            ("Broker connection", not bool(account_error)),
-            ("Positions feed", not bool(positions_error)),
-            ("Order feed", not bool(orders_error)),
-            ("Strategy engine",bool(report)),
+            (
+                "Broker connection",
+                not bool(account_error),
+            ),
+            (
+                "Positions feed",
+                not bool(positions_error),
+            ),
+            (
+                "Order feed",
+                not bool(orders_error),
+            ),
+            (
+                "Strategy engine",
+                bool(report),
+            ),
         ]
 
         for label, ok in statuses:
-            dot = "sf-dot-ok" if ok else "sf-dot-warn"
+            dot = (
+                "sf-dot-ok"
+                if ok
+                else "sf-dot-warn"
+            )
+
             st.markdown(
                 f"""
                 <div class="sf-status-row">
