@@ -894,12 +894,202 @@ a4.metric(
 
 
 # ============================================================
-# TODAY
+# PERFORMANCE
 # ============================================================
 
 st.divider()
 
-st.subheader("Today")
+st.subheader("Performance")
+
+p1, p2, p3, p4 = st.columns(4)
+
+p1.metric(
+    "Unrealised P/L",
+    f"{currency_symbol}{unrealized_ppl:,.2f}",
+)
+
+p2.metric(
+    "Realised P/L",
+    f"{currency_symbol}{realized_ppl:,.2f}",
+)
+
+p3.metric(
+    "Total P/L",
+    f"{currency_symbol}{total_ppl:,.2f}",
+)
+
+p4.metric(
+    "Portfolio Value",
+    f"{currency_symbol}{investment_value:,.2f}",
+)
+
+
+# ============================================================
+# HOLDINGS
+# ============================================================
+
+st.divider()
+
+st.subheader("Holdings")
+
+performance_rows = []
+
+for position in raw_positions:
+
+    ticker = extract_position_symbol(
+        position
+    )
+
+    company_name = extract_position_name(
+        position
+    )
+
+    stock_currency = extract_position_currency(
+        position
+    )
+
+    quantity = float_value(
+        position.get(
+            "quantity"
+        )
+    )
+
+    average_price = float_value(
+        position.get(
+            "averagePricePaid"
+        )
+    )
+
+    current_price = float_value(
+        position.get(
+            "currentPrice"
+        )
+    )
+
+    wallet = position.get(
+        "walletImpact",
+        {},
+    )
+
+    total_cost_gbp = float_value(
+        wallet.get(
+            "totalCost"
+        )
+    )
+
+    current_value_gbp = float_value(
+        wallet.get(
+            "currentValue"
+        )
+    )
+
+    position_ppl_gbp = float_value(
+        wallet.get(
+            "unrealizedProfitLoss"
+        )
+    )
+
+    fx_impact_gbp = float_value(
+        wallet.get(
+            "fxImpact"
+        )
+    )
+
+    target_weight = float_value(
+        weights.get(
+            ticker,
+            0,
+        )
+    )
+
+    return_pct = (
+        (
+            position_ppl_gbp
+            / total_cost_gbp
+        )
+        * 100
+        if total_cost_gbp
+        else 0
+    )
+
+    performance_rows.append(
+        {
+            "Ticker": ticker,
+            "Company": company_name,
+            "Currency": stock_currency,
+            "Quantity": round(
+                quantity,
+                4,
+            ),
+            "Average Price": round(
+                average_price,
+                2,
+            ),
+            "Current Price": round(
+                current_price,
+                2,
+            ),
+            "Cost (£)": round(
+                total_cost_gbp,
+                2,
+            ),
+            "Value (£)": round(
+                current_value_gbp,
+                2,
+            ),
+            "P/L (£)": round(
+                position_ppl_gbp,
+                2,
+            ),
+            "FX (£)": round(
+                fx_impact_gbp,
+                2,
+            ),
+            "Return %": round(
+                return_pct,
+                2,
+            ),
+            "Target %": round(
+                target_weight * 100,
+                2,
+            ),
+        }
+    )
+
+
+if performance_rows:
+
+    performance_df = pd.DataFrame(
+        performance_rows
+    )
+
+    st.dataframe(
+        performance_df,
+        use_container_width=True,
+        hide_index=True,
+    )
+
+else:
+
+    st.info(
+        "No open Practice positions."
+    )
+
+
+st.caption(
+    "GBP cost, value and P/L come directly from Trading 212 "
+    "walletImpact data. US stock prices are quoted in USD."
+)
+
+
+
+# ============================================================
+# GAINZ STRATEGY
+# ============================================================
+
+st.divider()
+
+st.subheader("GainZ Strategy")
 
 mode = decision.get(
     "mode",
@@ -965,339 +1155,6 @@ st.write(
 
 
 # ============================================================
-# PERFORMANCE
-# ============================================================
-
-st.divider()
-
-st.subheader("Performance")
-
-p1, p2, p3, p4 = st.columns(4)
-
-p1.metric(
-    "Unrealised P/L",
-    f"{currency_symbol}{unrealized_ppl:,.2f}",
-)
-
-p2.metric(
-    "Realised P/L",
-    f"{currency_symbol}{realized_ppl:,.2f}",
-)
-
-p3.metric(
-    "Total P/L",
-    f"{currency_symbol}{total_ppl:,.2f}",
-)
-
-p4.metric(
-    "Portfolio Value",
-    f"{currency_symbol}{investment_value:,.2f}",
-)
-
-
-# ============================================================
-# PERFORMANCE TABLE
-# ============================================================
-
-performance_rows = []
-
-for position in raw_positions:
-
-    ticker = extract_position_symbol(
-        position
-    )
-
-    company_name = extract_position_name(
-        position
-    )
-
-    stock_currency = extract_position_currency(
-        position
-    )
-
-    quantity = float_value(
-        position.get(
-            "quantity"
-        )
-    )
-
-    average_price = float_value(
-        position.get(
-            "averagePricePaid"
-        )
-    )
-
-    current_price = float_value(
-        position.get(
-            "currentPrice"
-        )
-    )
-
-    wallet = position.get(
-        "walletImpact",
-        {},
-    )
-
-    total_cost_gbp = float_value(
-        wallet.get(
-            "totalCost"
-        )
-    )
-
-    current_value_gbp = float_value(
-        wallet.get(
-            "currentValue"
-        )
-    )
-
-    position_ppl_gbp = float_value(
-        wallet.get(
-            "unrealizedProfitLoss"
-        )
-    )
-
-    fx_impact_gbp = float_value(
-        wallet.get(
-            "fxImpact"
-        )
-    )
-
-    return_pct = (
-        (
-            position_ppl_gbp
-            / total_cost_gbp
-        )
-        * 100
-        if total_cost_gbp
-        else 0
-    )
-
-    performance_rows.append(
-        {
-            "Ticker": ticker,
-            "Company": company_name,
-            "Currency": stock_currency,
-            "Quantity": round(
-                quantity,
-                4,
-            ),
-            "Average Price": round(
-                average_price,
-                2,
-            ),
-            "Current Price": round(
-                current_price,
-                2,
-            ),
-            "Cost (£)": round(
-                total_cost_gbp,
-                2,
-            ),
-            "Value (£)": round(
-                current_value_gbp,
-                2,
-            ),
-            "P/L (£)": round(
-                position_ppl_gbp,
-                2,
-            ),
-            "FX (£)": round(
-                fx_impact_gbp,
-                2,
-            ),
-            "Return %": round(
-                return_pct,
-                2,
-            ),
-        }
-    )
-
-
-if performance_rows:
-
-    performance_df = pd.DataFrame(
-        performance_rows
-    )
-
-    st.dataframe(
-        performance_df,
-        use_container_width=True,
-        hide_index=True,
-    )
-
-else:
-
-    st.info(
-        "No open Practice positions."
-    )
-
-
-st.caption(
-    "GBP cost, value and P/L come directly from Trading 212 "
-    "walletImpact data. US stock prices are quoted in USD."
-)
-
-
-
-# ============================================================
-# ORDERS
-# ============================================================
-
-st.divider()
-
-st.subheader("Orders")
-
-rejected_count = len(
-    [
-        order
-        for order in broker_orders
-        if str(
-            order.get(
-                "status",
-                ""
-            )
-        ).upper()
-        in {
-            "REJECTED",
-            "FAILED",
-            "ERROR",
-        }
-    ]
-)
-
-
-o1, o2, o3 = st.columns(3)
-
-o1.metric(
-    "Pending",
-    pending_count,
-)
-
-o2.metric(
-    "Open Positions",
-    open_position_count,
-)
-
-o3.metric(
-    "Rejected",
-    rejected_count,
-)
-
-
-# ============================================================
-# PORTFOLIO
-# ============================================================
-
-st.divider()
-
-st.subheader("Portfolio")
-
-if raw_positions:
-
-    portfolio_rows = []
-
-    for position in raw_positions:
-
-        ticker = extract_position_symbol(
-            position
-        )
-
-        company_name = extract_position_name(
-            position
-        )
-
-        quantity = float_value(
-            position.get(
-                "quantity"
-            )
-        )
-
-        average_price = float_value(
-            position.get(
-                "averagePricePaid"
-            )
-        )
-
-        current_price = float_value(
-            position.get(
-                "currentPrice"
-            )
-        )
-
-        wallet = position.get(
-            "walletImpact",
-            {},
-        )
-
-        current_value_gbp = float_value(
-            wallet.get(
-                "currentValue"
-            )
-        )
-
-        pnl_gbp = float_value(
-            wallet.get(
-                "unrealizedProfitLoss"
-            )
-        )
-
-        target_weight = float_value(
-            weights.get(
-                ticker,
-                0,
-            )
-        )
-
-        portfolio_rows.append(
-            {
-                "Ticker": ticker,
-                "Company": company_name,
-                "Quantity": round(
-                    quantity,
-                    4,
-                ),
-                "Average Price": round(
-                    average_price,
-                    2,
-                ),
-                "Current Price": round(
-                    current_price,
-                    2,
-                ),
-                "Value (£)": round(
-                    current_value_gbp,
-                    2,
-                ),
-                "P/L (£)": round(
-                    pnl_gbp,
-                    2,
-                ),
-                "Target %": round(
-                    target_weight * 100,
-                    2,
-                ),
-                "Status": "Held",
-            }
-        )
-
-    portfolio_df = pd.DataFrame(
-        portfolio_rows
-    )
-
-    st.dataframe(
-        portfolio_df,
-        use_container_width=True,
-        hide_index=True,
-    )
-
-else:
-
-    st.info(
-        "No open Practice positions."
-    )
-
-
-# ============================================================
 # TARGET PORTFOLIO
 # ============================================================
 
@@ -1346,22 +1203,6 @@ with st.expander(
             "Target portfolio is not currently available "
             "on this Render instance."
         )
-
-
-# ============================================================
-# HISTORICAL ORDER DATA
-# ============================================================
-
-st.divider()
-
-with st.expander("🧪 Historical order data"):
-    if historical_orders:
-        st.write(f"Historical orders loaded: {len(historical_orders)}")
-        st.json(historical_orders[:2])
-    elif historical_orders_error:
-        st.error(historical_orders_error)
-    else:
-        st.info("No historical Practice orders were returned.")
 
 
 # ============================================================
@@ -1418,7 +1259,7 @@ with st.expander(
 # ============================================================
 
 st.divider()
-st.subheader("🛑 GainZ Master Controls")
+st.subheader("🛑 Emergency Controls")
 
 paused = gainz_is_paused()
 
@@ -1711,7 +1552,7 @@ if st.button(
 
 st.divider()
 
-st.subheader("Controls")
+st.subheader("GainZ Actions")
 
 b1, b2, b3 = st.columns(3)
 
@@ -1879,61 +1720,6 @@ with st.expander(
             st.code(
                 str(error)
             )
-
-
-# ============================================================
-# ADVANCED
-# ============================================================
-
-with st.expander(
-    "⚙️ Advanced"
-):
-
-    st.write(
-        "**Credentials:**",
-        "Configured"
-        if credentials_present()
-        else "Missing",
-    )
-
-    st.write(
-        "**Reserved for orders:**",
-        f"{currency_symbol}{reserved_cash:,.2f}",
-    )
-
-    if decision:
-
-        st.write(
-            "**GainZ Sharpe:**",
-            round(
-                float_value(
-                    decision.get(
-                        "gainz_sharpe"
-                    )
-                ),
-                2,
-            ),
-        )
-
-        st.write(
-            "**Benchmark Sharpe:**",
-            round(
-                float_value(
-                    decision.get(
-                        "benchmark_sharpe"
-                    )
-                ),
-                2,
-            ),
-        )
-
-    st.write(
-        "**Raw strategy report:**"
-    )
-
-    st.json(
-        report
-    )
 
 
 # ============================================================
