@@ -10,3 +10,4 @@ streamlit
 feedparser
 transformers
 torch
+matplotlib
