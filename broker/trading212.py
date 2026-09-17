@@ -374,6 +374,105 @@ class Trading212Broker:
         return raw or []
 
     # =========================================================
+    # HISTORICAL ORDERS
+    # =========================================================
+
+    def historical_orders(
+        self,
+        limit: int = 50,
+        max_pages: int = 20,
+    ) -> list[dict]:
+        """
+        Retrieve historical Trading 212 orders.
+
+        READ ONLY.
+
+        This method does not place, modify,
+        or cancel any Trading 212 orders.
+
+        Trading 212 historical endpoints use
+        cursor-based pagination.
+        """
+
+        limit = max(
+            1,
+            min(
+                int(limit),
+                50,
+            ),
+        )
+
+        path = (
+            "/equity/history/orders"
+            f"?limit={limit}"
+        )
+
+        historical = []
+
+        for _ in range(max_pages):
+
+            raw = self._request(
+                "GET",
+                path,
+            )
+
+            if not isinstance(
+                raw,
+                dict,
+            ):
+                break
+
+            items = (
+                raw.get(
+                    "items",
+                    [],
+                )
+                or []
+            )
+
+            historical.extend(
+                items
+            )
+
+            next_page = raw.get(
+                "nextPagePath"
+            )
+
+            if not next_page:
+                break
+
+            next_page = str(
+                next_page
+            )
+
+            # self.base already contains /api/v0.
+            #
+            # Trading 212 may return the next page
+            # beginning with /api/v0, so strip it
+            # before passing it back to _request().
+
+            prefix = "/api/v0"
+
+            if next_page.startswith(
+                prefix
+            ):
+                next_page = next_page[
+                    len(prefix):
+                ]
+
+            if not next_page.startswith(
+                "/"
+            ):
+                next_page = (
+                    "/"
+                    + next_page
+                )
+
+            path = next_page
+
+        return historical
+
+    # =========================================================
     # MARKET ORDER
     # =========================================================
 
