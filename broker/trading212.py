@@ -23,10 +23,6 @@ class Trading212Error(RuntimeError):
 
 
 class Trading212Broker:
-    # API rate-limit safety. A 429 is retried only a small number of times.
-    MAX_429_RETRIES = 3
-    DEFAULT_429_WAIT_SECONDS = 5.0
-
     BASES = {
         "demo": "https://demo.trading212.com/api/v0",
         "live": "https://live.trading212.com/api/v0",
@@ -110,33 +106,21 @@ class Trading212Broker:
             method=method,
         )
 
-        # ---------------------------------------------------------
-        # Rate-limit handling
-        # ---------------------------------------------------------
-        # Trading 212 can return HTTP 429 when too many API calls
-        # are made in a short period. Retry only 429 responses.
-        #
-        # IMPORTANT:
-        # - POST order requests are NOT blindly retried.
-        # - This protects against accidentally creating a duplicate
-        #   order when the broker may have accepted a request but the
-        #   response was rate-limited/lost.
-        # - GET requests may be retried because they are read-only.
-        # ---------------------------------------------------------
-
+        # -----------------------------------------------------
+        # RATE-LIMIT HANDLING
+        # -----------------------------------------------------
+        # Only retry read-only requests. Never blindly retry a
+        # POST order after a 429, because the broker may already
+        # have accepted the order and a retry could duplicate it.
         is_read_only = method.upper() in {
             "GET",
             "HEAD",
             "OPTIONS",
         }
 
-        max_retries = (
-            self.MAX_429_RETRIES
-            if is_read_only
-            else 0
-        )
+        max_429_retries = 3 if is_read_only else 0
 
-        for attempt in range(max_retries + 1):
+        for attempt in range(max_429_retries + 1):
 
             try:
                 with urllib.request.urlopen(
@@ -152,13 +136,14 @@ class Trading212Broker:
                     return json.loads(body)
 
             except urllib.error.HTTPError as exc:
-
                 body = exc.read().decode(
                     errors="replace"
                 )
 
-                if exc.code == 429 and attempt < max_retries:
-
+                if (
+                    exc.code == 429
+                    and attempt < max_429_retries
+                ):
                     retry_after = None
 
                     try:
@@ -178,27 +163,23 @@ class Trading212Broker:
                         retry_after = None
 
                     if retry_after is None:
-                        retry_after = (
-                            self.DEFAULT_429_WAIT_SECONDS
-                            * (attempt + 1)
+                        retry_after = 5.0 * (
+                            attempt + 1
                         )
 
+                    # Keep a single retry wait bounded.
                     retry_after = max(
                         1.0,
-                        min(
-                            retry_after,
-                            60.0,
-                        ),
+                        min(retry_after, 60.0),
                     )
 
                     time.sleep(retry_after)
                     continue
 
                 if exc.code == 429:
-
                     raise Trading212Error(
                         "Trading 212 HTTP 429: too many requests. "
-                        "Read-only API retries were exhausted. "
+                        "Read-only retries were exhausted. "
                         "Wait before trying again."
                     ) from exc
 
@@ -207,7 +188,6 @@ class Trading212Broker:
                 ) from exc
 
             except urllib.error.URLError as exc:
-
                 raise Trading212Error(
                     f"Trading 212 connection error: {exc}"
                 ) from exc
@@ -563,6 +543,11 @@ class Trading212Broker:
         quantity: float,
     ) -> OrderResult:
 
+        # -----------------------------------------------------
+        # REAL-MONEY ISA SAFETY LOCK
+        # -----------------------------------------------------
+        # Keep this check before ticker lookup or any other
+        # network request related to order submission.
         if (
             self.environment == "isa"
             and os.getenv("GAINZ_ENABLE_ISA_TRADING") != "YES"
@@ -574,20 +559,59 @@ class Trading212Broker:
                 "have been validated."
             )
 
-        ticker = self.broker_ticker(
-            symbol
-        )
+        ticker = self.broker_ticker(symbol)
 
-        original_quantity = float(
-            quantity
-        )
+        original_quantity = float(quantity)
 
-        # Trading 212 may require different quantity
-        # precision depending on the instrument.
+        if original_quantity == 0:
+            raise Trading212Error(
+                f"Cannot submit {symbol}: quantity must be non-zero."
+            )
+
+        # -----------------------------------------------------
+        # LIVE / ISA
+        # -----------------------------------------------------
+        # Real-money environments submit the requested quantity
+        # exactly once. Do not apply the DEMO precision fallback
+        # and do not blindly retry POST requests.
         #
-        # In DEMO mode only, retry progressively lower
-        # decimal precision on precision-specific errors.
+        # This is especially important for full-position ISA
+        # liquidation, where rounding the position quantity could
+        # leave a residual holding.
+        if self.environment in {"live", "isa"}:
+            payload = {
+                "ticker": ticker,
+                "quantity": original_quantity,
+            }
 
+            raw = self._request(
+                "POST",
+                "/equity/orders/market",
+                payload,
+            )
+
+            order_id = None
+
+            if isinstance(raw, dict):
+                if raw.get("id") is not None:
+                    order_id = str(raw.get("id"))
+
+            return OrderResult(
+                symbol=symbol,
+                quantity=original_quantity,
+                status="SUBMITTED",
+                order_id=order_id,
+                message=(
+                    f"Trading 212 {self.environment.upper()} "
+                    "market order submitted with exact requested quantity."
+                ),
+            )
+
+        # -----------------------------------------------------
+        # DEMO
+        # -----------------------------------------------------
+        # Paper trading keeps the existing precision fallback.
+        # This is deliberately NOT used for real-money orders.
         precisions = [
             4,
             3,
@@ -622,18 +646,9 @@ class Trading212Broker:
 
                 order_id = None
 
-                if isinstance(
-                    raw,
-                    dict,
-                ):
-                    if raw.get(
-                        "id"
-                    ) is not None:
-                        order_id = str(
-                            raw.get(
-                                "id"
-                            )
-                        )
+                if isinstance(raw, dict):
+                    if raw.get("id") is not None:
+                        order_id = str(raw.get("id"))
 
                 return OrderResult(
                     symbol=symbol,
@@ -641,8 +656,7 @@ class Trading212Broker:
                     status="SUBMITTED",
                     order_id=order_id,
                     message=(
-                        f"Trading 212 {self.environment.upper()} "
-                        "market order submitted "
+                        "Trading 212 DEMO market order submitted "
                         f"with precision={precision}"
                     ),
                 )
@@ -650,9 +664,7 @@ class Trading212Broker:
             except Trading212Error as exc:
 
                 last_error = exc
-                error_text = str(
-                    exc
-                )
+                error_text = str(exc)
 
                 if (
                     "quantity-precision-mismatch"
@@ -660,14 +672,8 @@ class Trading212Broker:
                 ):
                     raise
 
-                # Precision retry is deliberately
-                # restricted to DEMO mode.
-
-                if self.environment != "demo":
-                    raise
-
         raise Trading212Error(
             f"Could not submit {symbol}. "
-            "Trading 212 rejected all quantity precisions. "
+            "Trading 212 rejected all DEMO quantity precisions. "
             f"Last error: {last_error}"
         )

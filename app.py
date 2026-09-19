@@ -15,9 +15,24 @@ from portfolio.history import (
     load_portfolio_history,
     calculate_daily_performance,
 )
-from portfolio.realized_pnl import calculate_realized_pnl
+from portfolio.realized_pnl import (
+    calculate_realized_pnl,
+    get_today_realized_pnl,
+)
 
-from broker.trading212 import Trading212Broker
+from broker.trading212 import Trading212Broker, Trading212Error
+from execution.planner import PlannedOrder
+from execution.engine import execute_orders
+from run_trading212 import (
+    SETTINGS,
+    MAX_POSITION_WEIGHT,
+    MAX_ORDER_WEIGHT,
+    MAX_EXPOSURE_WEIGHT,
+    MAX_DAILY_LOSS_WEIGHT,
+    build_new_cash_orders,
+    get_usd_to_gbp_rate,
+    load_prices,
+)
 
 
 # ============================================================
@@ -88,6 +103,13 @@ def get_isa_orders():
     """Read Trading 212 Stocks ISA pending orders. Read only."""
     broker = Trading212Broker(environment="isa")
     return broker.orders()
+
+
+@st.cache_data(ttl=CACHE_TTL)
+def get_isa_historical_orders():
+    """Read Trading 212 Stocks ISA historical orders. Read only."""
+    broker = Trading212Broker(environment="isa")
+    return broker.historical_orders()
 
 
 # ============================================================
@@ -722,6 +744,366 @@ def submit_practice_sell_all(raw_positions):
 
 
 # ============================================================
+# MANUAL ISA ORDERS — EXPLICIT BUTTON + CONFIRMATION ONLY
+# ============================================================
+
+def submit_manual_isa_order(symbol, quantity):
+    """
+    Submit exactly one manually confirmed Stocks ISA market order.
+
+    This helper is only called from the Stocks ISA BUY/SELL confirmation UI.
+    It is never called by strategy runs, page loads, refreshes, or GitHub Actions.
+    """
+    broker = Trading212Broker(environment="isa")
+
+    if broker.environment != "isa":
+        raise Trading212Error("Manual ISA order blocked: broker is not in ISA mode.")
+
+    if os.getenv("GAINZ_ENABLE_ISA_TRADING") != "YES":
+        raise Trading212Error(
+            "ISA order submission is locked. "
+            "Set GAINZ_ENABLE_ISA_TRADING=YES to permit a manually confirmed order."
+        )
+
+    pending = broker.orders()
+    if pending:
+        raise Trading212Error(
+            f"Manual ISA order blocked: {len(pending)} pending ISA order(s) already exist."
+        )
+
+    symbol = str(symbol or "").strip().upper()
+    quantity = float(quantity)
+
+    if not symbol:
+        raise Trading212Error("Manual ISA order blocked: ticker is required.")
+
+    if quantity == 0:
+        raise Trading212Error("Manual ISA order blocked: quantity must be non-zero.")
+
+    return broker.market_order(symbol, quantity)
+
+
+# ============================================================
+# ISA GAINZ BUY — FROZEN PREVIEW + EXECUTION HELPERS
+# ============================================================
+
+def isa_position_signature(raw_positions):
+    """Stable symbol/quantity signature used to detect portfolio changes."""
+    rows = []
+
+    for position in raw_positions or []:
+        symbol = extract_position_symbol(position)
+        quantity = float_value(
+            position.get(
+                "quantityAvailableForTrading",
+                position.get("quantity", 0),
+            )
+        )
+
+        if symbol != "Unknown" and quantity > 0:
+            rows.append(
+                (
+                    str(symbol).strip().upper(),
+                    round(float(quantity), 8),
+                )
+            )
+
+    return sorted(rows)
+
+
+def build_isa_gainz_preview(investment_amount, target_weights):
+    """
+    Build and risk-check an ISA-specific BUY-only plan.
+
+    This never submits an order. The returned order quantities are frozen
+    into session state and are the only quantities eligible for confirmation.
+    """
+    broker = Trading212Broker(environment="isa")
+
+    account = broker.account_summary()
+    raw_positions = broker.raw_positions()
+    positions = broker.positions()
+    pending_orders = broker.orders()
+
+    if pending_orders:
+        raise Trading212Error(
+            f"ISA investment preview blocked: {len(pending_orders)} "
+            "pending ISA order(s) already exist."
+        )
+
+    cash = extract_cash(account)
+    amount = float(investment_amount)
+
+    if amount <= 0:
+        raise Trading212Error(
+            "ISA investment amount must be greater than £0."
+        )
+
+    if amount > cash:
+        raise Trading212Error(
+            f"Requested ISA investment £{amount:.2f} exceeds "
+            f"available cash £{cash:.2f}."
+        )
+
+    positive_weights = {
+        str(symbol).strip().upper(): float_value(weight)
+        for symbol, weight in (target_weights or {}).items()
+        if float_value(weight) > 0
+    }
+
+    if not positive_weights:
+        raise Trading212Error(
+            "GainZ has no positive target weights available."
+        )
+
+    prices = {}
+    for symbol in positive_weights:
+        price_frame = load_prices(symbol)
+        if price_frame.empty:
+            continue
+        prices[symbol] = float(price_frame["Close"].iloc[-1])
+
+    usd_to_gbp = get_usd_to_gbp_rate()
+
+    planned_orders = build_new_cash_orders(
+        weights=positive_weights,
+        deployment_cash=amount,
+        prices=prices,
+        usd_to_gbp=usd_to_gbp,
+    )
+
+    if not planned_orders:
+        raise Trading212Error(
+            "GainZ produced no executable ISA BUY orders."
+        )
+
+    invested_value = sum(
+        float(position.market_value)
+        for position in positions
+    )
+    equity = float(cash) + invested_value
+
+    historical_orders = broker.historical_orders()
+    realized_analysis = calculate_realized_pnl(historical_orders)
+    today_realized_pnl = get_today_realized_pnl(realized_analysis)
+
+    risk_results = execute_orders(
+        broker=broker,
+        orders=planned_orders,
+        dry_run=True,
+        positions=positions,
+        equity=equity,
+        pending_orders=pending_orders,
+        max_position_weight=MAX_POSITION_WEIGHT,
+        max_order_weight=MAX_ORDER_WEIGHT,
+        max_exposure_weight=MAX_EXPOSURE_WEIGHT,
+        today_realized_pnl=today_realized_pnl,
+        max_daily_loss_weight=MAX_DAILY_LOSS_WEIGHT,
+    )
+
+    frozen_orders = []
+    result_rows = []
+
+    for order, result in zip(planned_orders, risk_results):
+        status = str(
+            getattr(result, "status", "") or ""
+        ).upper()
+
+        result_rows.append(
+            {
+                "symbol": order.symbol,
+                "side": "BUY",
+                "quantity": float(order.quantity),
+                "reference_price": float(order.reference_price),
+                "estimated_value": float(order.estimated_value),
+                "status": status,
+                "message": str(
+                    getattr(result, "message", "") or ""
+                ),
+            }
+        )
+
+        if status == "DRY_RUN_APPROVED":
+            frozen_orders.append(
+                {
+                    "symbol": str(order.symbol).strip().upper(),
+                    "quantity": float(order.quantity),
+                    "reference_price": float(order.reference_price),
+                    "estimated_value": float(order.estimated_value),
+                }
+            )
+
+    return {
+        "amount": amount,
+        "cash_at_preview": float(cash),
+        "position_signature": isa_position_signature(raw_positions),
+        "orders": result_rows,
+        "frozen_orders": frozen_orders,
+        "all_approved": (
+            bool(result_rows)
+            and len(frozen_orders) == len(result_rows)
+        ),
+        "usd_to_gbp": float(usd_to_gbp),
+    }
+
+
+def execute_frozen_isa_buy_preview(preview):
+    """
+    Revalidate then submit exactly the BUY quantities frozen in the preview.
+
+    No strategy recalculation occurs between preview and confirmation.
+    """
+    if os.getenv("GAINZ_ENABLE_ISA_TRADING") != "YES":
+        raise Trading212Error(
+            "ISA order submission is locked."
+        )
+
+    broker = Trading212Broker(environment="isa")
+
+    pending_orders = broker.orders()
+    if pending_orders:
+        raise Trading212Error(
+            f"ISA investment blocked: {len(pending_orders)} "
+            "pending ISA order(s) already exist."
+        )
+
+    account = broker.account_summary()
+    cash = extract_cash(account)
+    amount = float(preview.get("amount", 0.0))
+
+    if amount <= 0:
+        raise Trading212Error(
+            "ISA investment blocked: invalid frozen investment amount."
+        )
+
+    if amount > cash:
+        raise Trading212Error(
+            f"ISA investment blocked: available cash is now £{cash:.2f}, "
+            f"below the confirmed £{amount:.2f} amount."
+        )
+
+    raw_positions = broker.raw_positions()
+    current_signature = isa_position_signature(raw_positions)
+    frozen_signature = sorted(
+        [
+            (
+                str(symbol).strip().upper(),
+                round(float(quantity), 8),
+            )
+            for symbol, quantity in preview.get(
+                "position_signature",
+                [],
+            )
+        ]
+    )
+
+    if current_signature != frozen_signature:
+        raise Trading212Error(
+            "ISA investment blocked because the live holdings changed "
+            "after the preview. Build the portfolio again."
+        )
+
+    frozen_rows = preview.get("frozen_orders", []) or []
+    if not frozen_rows:
+        raise Trading212Error(
+            "ISA investment blocked: the frozen preview contains no orders."
+        )
+
+    planned_orders = [
+        PlannedOrder(
+            symbol=str(row["symbol"]).strip().upper(),
+            side="BUY",
+            quantity=float(row["quantity"]),
+            reference_price=float(row["reference_price"]),
+            estimated_value=float(row["estimated_value"]),
+        )
+        for row in frozen_rows
+    ]
+
+    positions = broker.positions()
+    invested_value = sum(
+        float(position.market_value)
+        for position in positions
+    )
+    equity = float(cash) + invested_value
+
+    historical_orders = broker.historical_orders()
+    realized_analysis = calculate_realized_pnl(historical_orders)
+    today_realized_pnl = get_today_realized_pnl(realized_analysis)
+
+    recheck = execute_orders(
+        broker=broker,
+        orders=planned_orders,
+        dry_run=True,
+        positions=positions,
+        equity=equity,
+        pending_orders=[],
+        max_position_weight=MAX_POSITION_WEIGHT,
+        max_order_weight=MAX_ORDER_WEIGHT,
+        max_exposure_weight=MAX_EXPOSURE_WEIGHT,
+        today_realized_pnl=today_realized_pnl,
+        max_daily_loss_weight=MAX_DAILY_LOSS_WEIGHT,
+    )
+
+    blocked = [
+        result
+        for result in recheck
+        if str(getattr(result, "status", "")).upper()
+        != "DRY_RUN_APPROVED"
+    ]
+
+    if blocked:
+        first = blocked[0]
+        raise Trading212Error(
+            "ISA investment blocked by the current risk checks: "
+            + str(getattr(first, "message", "") or "risk check failed")
+        )
+
+    submitted = []
+
+    for order in planned_orders:
+        try:
+            result = broker.market_order(
+                order.symbol,
+                abs(float(order.quantity)),
+            )
+
+            status = str(
+                getattr(result, "status", "SUBMITTED")
+                or "SUBMITTED"
+            ).upper()
+
+            submitted.append(
+                {
+                    "symbol": order.symbol,
+                    "quantity": float(order.quantity),
+                    "status": status,
+                    "order_id": getattr(result, "order_id", None),
+                    "message": str(
+                        getattr(result, "message", "") or ""
+                    ),
+                }
+            )
+
+            if status in {"REJECTED", "FAILED", "ERROR"}:
+                break
+
+        except Exception as exc:
+            submitted.append(
+                {
+                    "symbol": order.symbol,
+                    "quantity": float(order.quantity),
+                    "status": "ERROR",
+                    "order_id": None,
+                    "message": str(exc),
+                }
+            )
+            break
+
+    return submitted
+
+
+# ============================================================
 # SF ALPHA UI / SIDEBAR
 # ============================================================
 
@@ -1230,8 +1612,16 @@ topbar_environment = (
     else "● Trading 212 Practice"
 )
 
+isa_manual_trading_enabled = (
+    os.getenv("GAINZ_ENABLE_ISA_TRADING") == "YES"
+)
+
 topbar_lock = (
-    "🔒 ISA order submission locked"
+    (
+        "● Manual ISA trading enabled"
+        if isa_manual_trading_enabled
+        else "🔒 ISA order submission locked"
+    )
     if nav_page == "Stocks ISA"
     else "🔒 Real money locked"
 )
@@ -3076,7 +3466,7 @@ if nav_page == "Stocks ISA":
     st.subheader("Stocks ISA — Real Money")
     st.caption(
         "Live Trading 212 Stocks ISA data. "
-        "Order submission remains locked while the dashboard is validated."
+        "Manual SELL orders can only be submitted from the explicit sell panel below. GainZ investing remains separate."
     )
 
     if preview_mode:
@@ -3281,6 +3671,499 @@ if nav_page == "Stocks ISA":
                 config={"displaylogo": False},
             )
 
+        # ========================================================
+        # SELL ENTIRE ISA PORTFOLIO — MODAL CONFIRMATION
+        # ========================================================
+
+        st.markdown("### Sell from Stocks ISA")
+
+        sellable_positions = []
+
+        for position in isa_positions:
+            symbol = extract_position_symbol(position)
+            available = float_value(
+                position.get(
+                    "quantityAvailableForTrading",
+                    position.get("quantity", 0),
+                )
+            )
+            wallet = position.get("walletImpact", {}) or {}
+            market_value = float_value(wallet.get("currentValue"))
+
+            if symbol != "Unknown" and available > 0:
+                sellable_positions.append(
+                    {
+                        "symbol": symbol,
+                        "quantity": available,
+                        "market_value": market_value,
+                    }
+                )
+
+        sell_portfolio_value = sum(
+            item["market_value"]
+            for item in sellable_positions
+        )
+
+        isa_manual_enabled = (
+            os.getenv("GAINZ_ENABLE_ISA_TRADING") == "YES"
+        )
+
+        if sellable_positions:
+            st.markdown(
+                f"""
+                <div style="
+                    border:1px solid rgba(255,190,80,.24);
+                    background:linear-gradient(
+                        145deg,
+                        rgba(72,48,20,.22),
+                        rgba(17,24,32,.97)
+                    );
+                    border-radius:16px;
+                    padding:1.05rem 1.15rem;
+                    margin:.35rem 0 .75rem 0;
+                ">
+                    <div style="
+                        color:#f1c27d;
+                        font-size:1rem;
+                        font-weight:700;
+                        margin-bottom:.25rem;
+                    ">
+                        Sell Entire Portfolio
+                    </div>
+                    <div style="
+                        color:#8f9aaa;
+                        font-size:.82rem;
+                        line-height:1.5;
+                    ">
+                        Sell all {len(sellable_positions)} Stocks ISA holding(s).
+                        Estimated current value:
+                        <strong style="color:#eef1f5;">
+                            £{sell_portfolio_value:,.2f}
+                        </strong>.
+                        Nothing is submitted when this page loads, refreshes,
+                        or when GainZ runs.
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+            button_left, button_center, button_right = st.columns(
+                [2.15, 1.35, 2.15]
+            )
+
+            with button_center:
+                open_sell_modal = st.button(
+                    "Sell Entire Portfolio",
+                    key="isa_open_sell_entire_portfolio_modal",
+                    type="primary",
+                    width="stretch",
+                )
+
+            if open_sell_modal:
+                st.session_state[
+                    "isa_sell_entire_modal_open"
+                ] = True
+
+            @st.dialog("Confirm Sell Entire Portfolio")
+            def confirm_sell_entire_isa_modal():
+                # Re-read immediately when the modal opens so the
+                # confirmation is based on the latest broker state.
+                try:
+                    preview_broker = Trading212Broker(
+                        environment="isa"
+                    )
+
+                    preview_pending = preview_broker.orders()
+
+                    if preview_pending:
+                        st.error(
+                            f"Sell blocked: {len(preview_pending)} pending "
+                            "ISA order(s) already exist."
+                        )
+                        if st.button(
+                            "Close",
+                            key="isa_sell_modal_close_pending",
+                            width="stretch",
+                        ):
+                            st.session_state[
+                                "isa_sell_entire_modal_open"
+                            ] = False
+                            st.rerun()
+                        return
+
+                    preview_positions = (
+                        preview_broker.raw_positions()
+                    )
+
+                    preview_plan = []
+
+                    for position in preview_positions:
+                        symbol = extract_position_symbol(
+                            position
+                        )
+                        available = float_value(
+                            position.get(
+                                "quantityAvailableForTrading",
+                                position.get(
+                                    "quantity",
+                                    0,
+                                ),
+                            )
+                        )
+                        wallet = (
+                            position.get(
+                                "walletImpact",
+                                {},
+                            )
+                            or {}
+                        )
+                        value = float_value(
+                            wallet.get("currentValue")
+                        )
+
+                        if (
+                            symbol != "Unknown"
+                            and available > 0
+                        ):
+                            preview_plan.append(
+                                {
+                                    "symbol": symbol,
+                                    "quantity": available,
+                                    "market_value": value,
+                                }
+                            )
+
+                    if not preview_plan:
+                        st.info(
+                            "There are no ISA holdings available to sell."
+                        )
+                        if st.button(
+                            "Close",
+                            key="isa_sell_modal_close_empty",
+                            width="stretch",
+                        ):
+                            st.session_state[
+                                "isa_sell_entire_modal_open"
+                            ] = False
+                            st.rerun()
+                        return
+
+                    preview_value = sum(
+                        item["market_value"]
+                        for item in preview_plan
+                    )
+
+                    preview_symbols = ", ".join(
+                        item["symbol"]
+                        for item in preview_plan
+                    )
+
+                    st.markdown(
+                        """
+                        <div style="
+                            text-align:center;
+                            margin:.15rem 0 1rem 0;
+                        ">
+                            <div style="
+                                width:56px;
+                                height:56px;
+                                margin:0 auto .8rem auto;
+                                border-radius:50%;
+                                display:flex;
+                                align-items:center;
+                                justify-content:center;
+                                border:1px solid rgba(255,92,92,.55);
+                                background:rgba(255,92,92,.08);
+                                font-size:1.35rem;
+                            ">!</div>
+                            <div style="
+                                color:#aab3bf;
+                                font-size:.86rem;
+                                line-height:1.55;
+                            ">
+                                You are about to sell your entire Stocks ISA
+                                portfolio using market orders.
+                            </div>
+                        </div>
+                        """,
+                        unsafe_allow_html=True,
+                    )
+
+                    c1, c2 = st.columns(2)
+                    c1.metric(
+                        "Total holdings",
+                        len(preview_plan),
+                    )
+                    c2.metric(
+                        "Estimated value",
+                        f"£{preview_value:,.2f}",
+                    )
+
+                    st.markdown(
+                        f"""
+                        <div style="
+                            border:1px solid rgba(255,92,92,.30);
+                            background:rgba(255,92,92,.08);
+                            border-radius:12px;
+                            padding:.85rem .95rem;
+                            margin:.75rem 0 .9rem 0;
+                            color:#e5e9ef;
+                            font-size:.82rem;
+                            line-height:1.55;
+                        ">
+                            <strong>This action cannot be undone once the orders fill.</strong><br>
+                            Holdings to sell: {html.escape(preview_symbols)}.<br>
+                            Actual execution prices may differ from the
+                            current values shown on the dashboard.
+                        </div>
+                        """,
+                        unsafe_allow_html=True,
+                    )
+
+                    if not isa_manual_enabled:
+                        st.warning(
+                            "ISA trading is currently locked. "
+                            "The final sell button is disabled."
+                        )
+
+                    cancel_col, confirm_col = st.columns(2)
+
+                    with cancel_col:
+                        if st.button(
+                            "Cancel",
+                            key="isa_sell_entire_cancel",
+                            width="stretch",
+                        ):
+                            st.session_state[
+                                "isa_sell_entire_modal_open"
+                            ] = False
+                            st.rerun()
+
+                    with confirm_col:
+                        confirm_clicked = st.button(
+                            "Confirm Sell",
+                            key="isa_sell_entire_confirm",
+                            type="primary",
+                            width="stretch",
+                            disabled=not isa_manual_enabled,
+                        )
+
+                    if confirm_clicked:
+                        # Final fail-closed re-check immediately before
+                        # submitting any real-money order.
+                        final_broker = Trading212Broker(
+                            environment="isa"
+                        )
+
+                        final_pending = final_broker.orders()
+
+                        if final_pending:
+                            st.error(
+                                "Sell blocked because a pending ISA order "
+                                "appeared after the preview."
+                            )
+                            return
+
+                        final_positions = (
+                            final_broker.raw_positions()
+                        )
+
+                        final_plan = []
+
+                        for position in final_positions:
+                            symbol = extract_position_symbol(
+                                position
+                            )
+                            available = float_value(
+                                position.get(
+                                    "quantityAvailableForTrading",
+                                    position.get(
+                                        "quantity",
+                                        0,
+                                    ),
+                                )
+                            )
+
+                            if (
+                                symbol != "Unknown"
+                                and available > 0
+                            ):
+                                final_plan.append(
+                                    (
+                                        symbol,
+                                        float(available),
+                                    )
+                                )
+
+                        preview_signature = sorted(
+                            (
+                                item["symbol"],
+                                round(
+                                    float(item["quantity"]),
+                                    10,
+                                ),
+                            )
+                            for item in preview_plan
+                        )
+
+                        final_signature = sorted(
+                            (
+                                symbol,
+                                round(quantity, 10),
+                            )
+                            for symbol, quantity
+                            in final_plan
+                        )
+
+                        if (
+                            final_signature
+                            != preview_signature
+                        ):
+                            st.error(
+                                "Sell blocked because your ISA holdings "
+                                "changed after the confirmation modal opened. "
+                                "Close the modal and review the portfolio again."
+                            )
+                            return
+
+                        submitted = []
+
+                        try:
+                            # IMPORTANT:
+                            # The zero-pending-order check above is performed
+                            # once for the entire confirmed liquidation batch.
+                            # Reuse this broker for every holding so an order
+                            # submitted by this batch does not incorrectly
+                            # block the next holding.
+                            if (
+                                os.getenv("GAINZ_ENABLE_ISA_TRADING")
+                                != "YES"
+                            ):
+                                raise Trading212Error(
+                                    "ISA order submission is locked."
+                                )
+
+                            for symbol, quantity in final_plan:
+                                result = final_broker.market_order(
+                                    symbol,
+                                    -abs(float(quantity)),
+                                )
+
+                                status = str(
+                                    getattr(
+                                        result,
+                                        "status",
+                                        "SUBMITTED",
+                                    )
+                                    or "SUBMITTED"
+                                ).upper()
+
+                                submitted.append(
+                                    {
+                                        "symbol": symbol,
+                                        "quantity": quantity,
+                                        "status": status,
+                                        "order_id": getattr(
+                                            result,
+                                            "order_id",
+                                            None,
+                                        ),
+                                    }
+                                )
+
+                                if status in {
+                                    "REJECTED",
+                                    "FAILED",
+                                    "ERROR",
+                                }:
+                                    raise Trading212Error(
+                                        f"{symbol} SELL returned "
+                                        f"status {status}."
+                                    )
+
+                        except Exception as exc:
+                            st.error(
+                                "Order submission stopped. "
+                                f"{len(submitted)} order(s) may already "
+                                f"have been submitted. {exc}"
+                            )
+
+                            if submitted:
+                                st.dataframe(
+                                    pd.DataFrame(submitted),
+                                    width="stretch",
+                                    hide_index=True,
+                                )
+                            return
+
+                        st.success(
+                            f"{len(submitted)} ISA SELL order(s) submitted."
+                        )
+
+                        if submitted:
+                            st.dataframe(
+                                pd.DataFrame(submitted),
+                                width="stretch",
+                                hide_index=True,
+                            )
+
+                        st.session_state[
+                            "isa_sell_entire_modal_open"
+                        ] = False
+
+                        get_isa_account_summary.clear()
+                        get_isa_raw_positions.clear()
+                        get_isa_orders.clear()
+
+                except Exception as exc:
+                    st.error(
+                        f"Unable to prepare ISA sell confirmation: {exc}"
+                    )
+
+            if st.session_state.get(
+                "isa_sell_entire_modal_open",
+                False,
+            ):
+                confirm_sell_entire_isa_modal()
+
+            with st.expander(
+                "View details before selling",
+                expanded=False,
+            ):
+                details_df = pd.DataFrame(
+                    [
+                        {
+                            "Ticker": item["symbol"],
+                            "Quantity": (
+                                f'{item["quantity"]:.8f}'
+                            ),
+                            "Market Value": (
+                                f'£{item["market_value"]:,.2f}'
+                            ),
+                        }
+                        for item in sellable_positions
+                    ]
+                )
+
+                st.dataframe(
+                    details_df,
+                    width="stretch",
+                    hide_index=True,
+                )
+
+                st.caption(
+                    "These are market orders. Actual execution prices "
+                    "can differ from the current values shown above."
+                )
+
+        else:
+            st.info(
+                "There are no ISA holdings currently available to sell."
+            )
+
+        st.divider()
+
         st.markdown("### Invest with GainZ")
 
         st.markdown(
@@ -3289,12 +4172,16 @@ if nav_page == "Stocks ISA":
                 <div class="sf-invest-kicker">✦ GainZ Allocation Engine</div>
                 <div class="sf-invest-title">How much do you want to invest?</div>
                 <div class="sf-invest-copy">
-                    You choose the amount. GainZ chooses the portfolio.
+                    Build an exact, risk-checked Stocks ISA order plan before confirming.
                 </div>
             </div>
             """,
             unsafe_allow_html=True,
         )
+
+        def set_isa_invest_amount(amount):
+            st.session_state["isa_gainz_invest_amount"] = float(amount)
+            st.session_state.pop("isa_gainz_preview", None)
 
         isa_invest_amount = st.number_input(
             "Investment amount (£)",
@@ -3307,26 +4194,39 @@ if nav_page == "Stocks ISA":
 
         quick1, quick2, quick3, quick4 = st.columns(4)
 
-        if quick1.button("£100", key="isa_quick_100", width='stretch'):
-            st.session_state["isa_gainz_invest_amount"] = 100.0
-            st.rerun()
-
-        if quick2.button("£250", key="isa_quick_250", width='stretch'):
-            st.session_state["isa_gainz_invest_amount"] = 250.0
-            st.rerun()
-
-        if quick3.button("£500", key="isa_quick_500", width='stretch'):
-            st.session_state["isa_gainz_invest_amount"] = 500.0
-            st.rerun()
-
-        if quick4.button("MAX CASH", key="isa_quick_max", width='stretch'):
-            st.session_state["isa_gainz_invest_amount"] = float(isa_cash)
-            st.rerun()
+        quick1.button(
+            "£100",
+            key="isa_quick_100",
+            width="stretch",
+            on_click=set_isa_invest_amount,
+            args=(100.0,),
+        )
+        quick2.button(
+            "£250",
+            key="isa_quick_250",
+            width="stretch",
+            on_click=set_isa_invest_amount,
+            args=(250.0,),
+        )
+        quick3.button(
+            "£500",
+            key="isa_quick_500",
+            width="stretch",
+            on_click=set_isa_invest_amount,
+            args=(500.0,),
+        )
+        quick4.button(
+            "MAX CASH",
+            key="isa_quick_max",
+            width="stretch",
+            on_click=set_isa_invest_amount,
+            args=(float(isa_cash),),
+        )
 
         st.markdown(
             '<div class="sf-invest-note">'
-            'No ticker selection required • GainZ uses the existing strategy '
-            'to determine the target portfolio'
+            'No ticker selection required • GainZ uses the current strategy '
+            'and the ISA risk controls'
             '</div>',
             unsafe_allow_html=True,
         )
@@ -3336,157 +4236,275 @@ if nav_page == "Stocks ISA":
         if st.button(
             "✦ BUILD MY PORTFOLIO",
             key="isa_build_gainz_portfolio",
-            width='stretch',
+            width="stretch",
             type="primary",
         ):
             if isa_invest_amount <= 0:
                 st.error("Enter an investment amount greater than £0.")
+
             elif isa_invest_amount > isa_cash:
-                st.error(
-                    f"That amount is above the ISA cash currently available "
-                    f"({isa_symbol}{isa_cash:,.2f})."
-                )
+                @st.dialog("Not Enough Cash")
+                def show_isa_insufficient_cash_dialog():
+                    shortfall = max(
+                        float(isa_invest_amount) - float(isa_cash),
+                        0.0,
+                    )
+
+                    st.markdown(
+                        f"""
+                        You entered **{isa_symbol}{isa_invest_amount:,.2f}**, but
+                        only **{isa_symbol}{isa_cash:,.2f}** is currently
+                        available as cash in your Stocks ISA.
+
+                        **Additional cash needed:**
+                        {isa_symbol}{shortfall:,.2f}
+                        """
+                    )
+
+                    if st.button(
+                        "OK",
+                        key="isa_insufficient_cash_ok",
+                        width="stretch",
+                        type="primary",
+                    ):
+                        st.rerun()
+
+                show_isa_insufficient_cash_dialog()
+
             elif not weights:
                 st.error(
                     "GainZ does not currently have a target portfolio available. "
                     "Run the strategy first, then return to this page."
                 )
+
             else:
-                positive_weights = {
-                    str(symbol).upper(): float_value(weight)
-                    for symbol, weight in weights.items()
-                    if float_value(weight) > 0
-                }
-
-                total_target_weight = sum(positive_weights.values())
-
-                if total_target_weight <= 0:
-                    st.error(
-                        "GainZ returned no positive target allocations."
-                    )
-                else:
-                    allocation_rows = []
-
-                    for symbol, target_weight in sorted(
-                        positive_weights.items(),
-                        key=lambda item: item[1],
-                        reverse=True,
+                try:
+                    with st.spinner(
+                        "Building and risk-checking the exact ISA portfolio..."
                     ):
-                        normalized_weight = (
-                            target_weight / total_target_weight
+                        st.session_state["isa_gainz_preview"] = (
+                            build_isa_gainz_preview(
+                                isa_invest_amount,
+                                weights,
+                            )
                         )
-                        allocation_amount = (
-                            float(isa_invest_amount)
-                            * normalized_weight
-                        )
+                    st.rerun()
 
-                        allocation_rows.append(
-                            {
-                                "Ticker": symbol,
-                                "GainZ Weight": normalized_weight,
-                                "Amount": allocation_amount,
-                            }
-                        )
-
-                    st.session_state["isa_gainz_preview"] = {
-                        "amount": float(isa_invest_amount),
-                        "allocations": allocation_rows,
-                    }
+                except Exception as exc:
+                    st.error(
+                        f"GainZ could not build the ISA portfolio: {exc}"
+                    )
 
         gainz_preview = st.session_state.get("isa_gainz_preview")
 
         if gainz_preview:
-            st.markdown("### GainZ Investment Preview")
-            st.caption(
-                "Preview only — these are proposed allocations. "
-                "No real-money order is submitted from this screen."
+            preview_amount = float(
+                gainz_preview.get("amount", 0.0)
+            )
+            preview_orders = gainz_preview.get("orders", []) or []
+            frozen_orders = (
+                gainz_preview.get("frozen_orders", []) or []
+            )
+            all_approved = bool(
+                gainz_preview.get("all_approved", False)
             )
 
-            preview_amount = float(gainz_preview["amount"])
-            preview_rows = gainz_preview["allocations"]
+            planned_stock_value = sum(
+                float_value(row.get("estimated_value"))
+                for row in frozen_orders
+            )
+            reserve = max(
+                preview_amount - planned_stock_value,
+                0.0,
+            )
 
-            g1, g2, g3 = st.columns(3)
+            st.markdown("### GainZ ISA Investment Preview")
+            st.caption(
+                "No order has been submitted. These exact quantities are "
+                "frozen for this preview and will not be recalculated when "
+                "you press Confirm Investment."
+            )
+
+            g1, g2, g3, g4 = st.columns(4)
             g1.metric(
-                "Investment",
+                "Capital Assigned",
                 f"{isa_symbol}{preview_amount:,.2f}",
             )
             g2.metric(
-                "Selected by GainZ",
-                len(preview_rows),
+                "Planned for Stocks",
+                f"{isa_symbol}{planned_stock_value:,.2f}",
             )
             g3.metric(
-                "Cash After Preview",
-                f"{isa_symbol}{max(isa_cash - preview_amount, 0):,.2f}",
+                "GainZ Cash Reserve",
+                f"{isa_symbol}{reserve:,.2f}",
+            )
+            g4.metric(
+                "Risk Approved",
+                f"{len(frozen_orders)}/{len(preview_orders)}",
             )
 
-            preview_df = pd.DataFrame(preview_rows)
-            preview_df["Allocation"] = preview_df["GainZ Weight"].map(
-                lambda value: f"{value * 100:.1f}%"
-            )
-            preview_df["Amount (£)"] = preview_df["Amount"].map(
-                lambda value: f"£{value:,.2f}"
-            )
+            if preview_orders:
+                preview_df = pd.DataFrame(preview_orders)
 
-            isa_preview_display = preview_df[
-                ["Ticker", "Allocation", "Amount (£)"]
-            ].copy()
-            isa_preview_display = add_logo_column(
-                isa_preview_display,
-                "Ticker",
-            )
-
-            st.dataframe(
-                isa_preview_display,
-                hide_index=True,
-                width='stretch',
-                column_config=LOGO_COLUMN_CONFIG,
-            )
-
-            preview_df_chart = preview_df.copy()
-            fig_preview = go.Figure(
-                data=[
-                    go.Pie(
-                        labels=preview_df_chart["Ticker"],
-                        values=preview_df_chart["Amount"],
-                        hole=0.68,
-                        textinfo="label+percent",
-                        hovertemplate=(
-                            "<b>%{label}</b><br>"
-                            "£%{value:,.2f}<br>"
-                            "%{percent}<extra></extra>"
+                display_df = pd.DataFrame(
+                    {
+                        "Ticker": preview_df["symbol"],
+                        "Side": preview_df["side"],
+                        "Quantity": preview_df["quantity"].map(
+                            lambda value: f"{float_value(value):.8f}"
                         ),
-                    )
-                ]
-            )
-            fig_preview.update_layout(
-                height=400,
-                margin=dict(l=10, r=10, t=15, b=10),
-                paper_bgcolor="rgba(0,0,0,0)",
-                plot_bgcolor="rgba(0,0,0,0)",
-                annotations=[
-                    dict(
-                        text=(
-                            f"<b>{isa_symbol}{preview_amount:,.2f}</b>"
-                            "<br><span style='font-size:11px'>GAINZ PLAN</span>"
+                        "Est. Value (£)": preview_df[
+                            "estimated_value"
+                        ].map(
+                            lambda value: f"£{float_value(value):,.2f}"
                         ),
-                        x=0.5,
-                        y=0.5,
-                        showarrow=False,
-                        font=dict(size=18),
+                        "Risk Status": preview_df["status"],
+                        "Risk Message": preview_df["message"],
+                    }
+                )
+
+                display_df = add_logo_column(
+                    display_df,
+                    "Ticker",
+                )
+
+                st.dataframe(
+                    display_df,
+                    hide_index=True,
+                    width="stretch",
+                    column_config=LOGO_COLUMN_CONFIG,
+                )
+
+            if not all_approved:
+                st.error(
+                    "One or more proposed ISA BUY orders did not pass the "
+                    "risk engine. Real-money confirmation is disabled."
+                )
+
+            elif frozen_orders:
+                st.success(
+                    "All proposed ISA BUY orders passed the current "
+                    "execution risk checks."
+                )
+
+                @st.dialog("Confirm ISA Investment")
+                def show_isa_buy_confirmation():
+                    st.markdown(
+                        f"""
+                        You are about to submit **{len(frozen_orders)} real-money
+                        BUY order(s)** to your Trading 212 Stocks ISA.
+
+                        **Investment amount:** {isa_symbol}{preview_amount:,.2f}
+
+                        **Estimated stock deployment:**
+                        {isa_symbol}{planned_stock_value:,.2f}
+
+                        The exact share quantities shown in the preview are
+                        frozen. Market execution prices can still differ.
+                        """
                     )
-                ],
-            )
 
-            st.plotly_chart(
-                fig_preview,
-                width='stretch',
-                config={"displaylogo": False},
-            )
+                    if os.getenv("GAINZ_ENABLE_ISA_TRADING") != "YES":
+                        st.warning(
+                            "ISA order submission is currently locked."
+                        )
 
-            st.warning(
-                "🔒 REAL EXECUTION LOCKED — this preview does not place "
-                "any Stocks ISA orders."
-            )
+                    cancel_col, confirm_col = st.columns(2)
+
+                    if cancel_col.button(
+                        "Cancel",
+                        key="isa_buy_confirm_cancel",
+                        width="stretch",
+                    ):
+                        st.rerun()
+
+                    if confirm_col.button(
+                        "Confirm Investment",
+                        key="isa_buy_confirm_submit",
+                        width="stretch",
+                        type="primary",
+                        disabled=(
+                            os.getenv("GAINZ_ENABLE_ISA_TRADING")
+                            != "YES"
+                        ),
+                    ):
+                        try:
+                            with st.spinner(
+                                "Re-checking ISA and submitting "
+                                "the confirmed BUY orders..."
+                            ):
+                                submitted = (
+                                    execute_frozen_isa_buy_preview(
+                                        gainz_preview
+                                    )
+                                )
+
+                            accepted_statuses = {
+                                "SUBMITTED",
+                                "FILLED",
+                                "ACCEPTED",
+                                "PENDING",
+                                "NEW",
+                            }
+
+                            accepted = [
+                                row
+                                for row in submitted
+                                if str(
+                                    row.get("status", "")
+                                ).upper() in accepted_statuses
+                            ]
+
+                            failed = [
+                                row
+                                for row in submitted
+                                if str(
+                                    row.get("status", "")
+                                ).upper() not in accepted_statuses
+                            ]
+
+                            if failed:
+                                st.error(
+                                    f"Order submission stopped. "
+                                    f"{len(accepted)} order(s) may already "
+                                    "have been submitted."
+                                )
+                                st.dataframe(
+                                    pd.DataFrame(submitted),
+                                    hide_index=True,
+                                    width="stretch",
+                                )
+                            else:
+                                st.session_state[
+                                    "isa_gainz_preview"
+                                ] = None
+                                get_isa_account_summary.clear()
+                                get_isa_raw_positions.clear()
+                                get_isa_orders.clear()
+                                get_isa_historical_orders.clear()
+
+                                st.success(
+                                    f"{len(accepted)} real-money ISA BUY "
+                                    "order(s) were submitted."
+                                )
+                                st.dataframe(
+                                    pd.DataFrame(submitted),
+                                    hide_index=True,
+                                    width="stretch",
+                                )
+
+                        except Exception as exc:
+                            st.error(
+                                f"ISA investment was not submitted: {exc}"
+                            )
+
+                if st.button(
+                    "CONFIRM ISA INVESTMENT",
+                    key="isa_open_buy_confirmation",
+                    width="stretch",
+                    type="primary",
+                ):
+                    show_isa_buy_confirmation()
 
         st.markdown("### ISA Safety State")
 
@@ -3520,8 +4538,12 @@ if nav_page == "Stocks ISA":
                 ),
             },
             {
-                "Check": "Dashboard order submission",
-                "Status": "DISABLED",
+                "Check": "Dashboard manual SELL",
+                "Status": (
+                    "ENABLED"
+                    if isa_trading_unlocked
+                    else "LOCKED"
+                ),
             },
             {
                 "Check": "Broker ISA execution lock",
@@ -3540,14 +4562,15 @@ if nav_page == "Stocks ISA":
         )
 
         if isa_trading_unlocked:
-            st.error(
-                "GAINZ_ENABLE_ISA_TRADING=YES is currently set. "
-                "Remove it while the ISA dashboard is still in "
-                "preview-only development."
+            st.warning(
+                "Manual ISA trading is enabled. "
+                "No order is submitted by page load, refresh, strategy execution, "
+                "or the GainZ allocation preview. A real order requires the "
+                "Manual ISA Trade panel plus the exact confirmation phrase."
             )
         else:
             st.success(
-                "Real-money order submission remains locked."
+                "Real-money ISA order submission remains locked."
             )
 
 
