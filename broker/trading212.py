@@ -11,6 +11,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import time
 import urllib.error
 import urllib.request
 
@@ -22,6 +23,10 @@ class Trading212Error(RuntimeError):
 
 
 class Trading212Broker:
+    # API rate-limit safety. A 429 is retried only a small number of times.
+    MAX_429_RETRIES = 3
+    DEFAULT_429_WAIT_SECONDS = 5.0
+
     BASES = {
         "demo": "https://demo.trading212.com/api/v0",
         "live": "https://live.trading212.com/api/v0",
@@ -105,32 +110,111 @@ class Trading212Broker:
             method=method,
         )
 
-        try:
-            with urllib.request.urlopen(
-                request,
-                timeout=20,
-            ) as response:
+        # ---------------------------------------------------------
+        # Rate-limit handling
+        # ---------------------------------------------------------
+        # Trading 212 can return HTTP 429 when too many API calls
+        # are made in a short period. Retry only 429 responses.
+        #
+        # IMPORTANT:
+        # - POST order requests are NOT blindly retried.
+        # - This protects against accidentally creating a duplicate
+        #   order when the broker may have accepted a request but the
+        #   response was rate-limited/lost.
+        # - GET requests may be retried because they are read-only.
+        # ---------------------------------------------------------
 
-                body = response.read().decode()
+        is_read_only = method.upper() in {
+            "GET",
+            "HEAD",
+            "OPTIONS",
+        }
 
-                if not body:
-                    return {}
+        max_retries = (
+            self.MAX_429_RETRIES
+            if is_read_only
+            else 0
+        )
 
-                return json.loads(body)
+        for attempt in range(max_retries + 1):
 
-        except urllib.error.HTTPError as exc:
-            body = exc.read().decode(
-                errors="replace"
-            )
+            try:
+                with urllib.request.urlopen(
+                    request,
+                    timeout=20,
+                ) as response:
 
-            raise Trading212Error(
-                f"Trading 212 HTTP {exc.code}: {body}"
-            ) from exc
+                    body = response.read().decode()
 
-        except urllib.error.URLError as exc:
-            raise Trading212Error(
-                f"Trading 212 connection error: {exc}"
-            ) from exc
+                    if not body:
+                        return {}
+
+                    return json.loads(body)
+
+            except urllib.error.HTTPError as exc:
+
+                body = exc.read().decode(
+                    errors="replace"
+                )
+
+                if exc.code == 429 and attempt < max_retries:
+
+                    retry_after = None
+
+                    try:
+                        raw_retry_after = (
+                            exc.headers.get("Retry-After")
+                        )
+
+                        if raw_retry_after:
+                            retry_after = float(
+                                raw_retry_after
+                            )
+
+                    except (
+                        TypeError,
+                        ValueError,
+                    ):
+                        retry_after = None
+
+                    if retry_after is None:
+                        retry_after = (
+                            self.DEFAULT_429_WAIT_SECONDS
+                            * (attempt + 1)
+                        )
+
+                    retry_after = max(
+                        1.0,
+                        min(
+                            retry_after,
+                            60.0,
+                        ),
+                    )
+
+                    time.sleep(retry_after)
+                    continue
+
+                if exc.code == 429:
+
+                    raise Trading212Error(
+                        "Trading 212 HTTP 429: too many requests. "
+                        "Read-only API retries were exhausted. "
+                        "Wait before trying again."
+                    ) from exc
+
+                raise Trading212Error(
+                    f"Trading 212 HTTP {exc.code}: {body}"
+                ) from exc
+
+            except urllib.error.URLError as exc:
+
+                raise Trading212Error(
+                    f"Trading 212 connection error: {exc}"
+                ) from exc
+
+        raise Trading212Error(
+            "Trading 212 request failed after rate-limit retries."
+        )
 
     # =========================================================
     # ACCOUNT
