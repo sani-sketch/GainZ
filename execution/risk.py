@@ -9,12 +9,44 @@ class RiskDecision:
     reason: str
 
 
+def _normalise_ticker(value: object) -> str:
+    """
+    Convert Trading 212 instrument tickers such as:
+
+        ADP_US_EQ
+        AMD_US_EQ
+
+    into GainZ symbols:
+
+        ADP
+        AMD
+
+    Also handles already-normalised symbols.
+    """
+
+    value = str(value or "").strip().upper()
+
+    if not value:
+        return ""
+
+    # Trading 212 US equity instrument format.
+    if value.endswith("_US_EQ"):
+        return value[:-6]
+
+    # Defensive fallback for other instrument suffixes.
+    if "_" in value:
+        return value.split("_")[0]
+
+    return value
+
+
 def check_max_position_size(
     order,
     positions,
     equity: float,
     max_position_weight: float = 0.15,
 ) -> RiskDecision:
+
     if equity <= 0:
         return RiskDecision(
             False,
@@ -27,10 +59,12 @@ def check_max_position_size(
             "RISK APPROVED: SELL does not increase position size.",
         )
 
+    symbol = _normalise_ticker(order.symbol)
+
     current_market_value = 0.0
 
-    for position in positions:
-        if str(position.symbol).upper() == str(order.symbol).upper():
+    for position in positions or []:
+        if _normalise_ticker(position.symbol) == symbol:
             current_market_value += max(
                 float(position.market_value),
                 0.0,
@@ -41,23 +75,26 @@ def check_max_position_size(
         + max(float(order.estimated_value), 0.0)
     )
 
-    proposed_weight = proposed_market_value / float(equity)
+    proposed_weight = (
+        proposed_market_value
+        / float(equity)
+    )
 
     if proposed_weight > float(max_position_weight):
         return RiskDecision(
             False,
             (
-                f"RISK: {order.symbol} position would become "
-                f"{proposed_weight * 100:.1f}% of equity, above the "
-                f"{max_position_weight * 100:.1f}% limit."
+                f"RISK: {symbol} position would become "
+                f"{proposed_weight:.1%} of equity, above the "
+                f"{max_position_weight:.1%} limit."
             ),
         )
 
     return RiskDecision(
         True,
         (
-            f"RISK APPROVED: {order.symbol} proposed position "
-            f"{proposed_weight * 100:.1f}% of equity."
+            f"RISK APPROVED: {symbol} proposed position "
+            f"{proposed_weight:.1%} of equity."
         ),
     )
 
@@ -67,6 +104,7 @@ def check_max_order_value(
     equity: float,
     max_order_weight: float = 0.10,
 ) -> RiskDecision:
+
     if equity <= 0:
         return RiskDecision(
             False,
@@ -84,14 +122,17 @@ def check_max_order_value(
         0.0,
     )
 
-    order_weight = order_value / float(equity)
+    order_weight = (
+        order_value
+        / float(equity)
+    )
 
     if order_weight > float(max_order_weight):
         return RiskDecision(
             False,
             (
-                f"RISK: Order value is {order_weight * 100:.1f}% of equity, "
-                f"above the {max_order_weight * 100:.1f}% limit."
+                f"RISK: Order value is {order_weight:.1%} of equity, "
+                f"above the {max_order_weight:.1%} limit."
             ),
         )
 
@@ -99,7 +140,7 @@ def check_max_order_value(
         True,
         (
             f"RISK APPROVED: Order value is "
-            f"{order_weight * 100:.1f}% of equity."
+            f"{order_weight:.1%} of equity."
         ),
     )
 
@@ -111,6 +152,7 @@ def check_max_portfolio_exposure(
     max_exposure_weight: float = 0.90,
     approved_buy_value: float = 0.0,
 ) -> RiskDecision:
+
     if equity <= 0:
         return RiskDecision(
             False,
@@ -125,7 +167,7 @@ def check_max_portfolio_exposure(
 
     invested_value = sum(
         max(float(position.market_value), 0.0)
-        for position in positions
+        for position in positions or []
     )
 
     proposed_invested_value = (
@@ -144,8 +186,8 @@ def check_max_portfolio_exposure(
             False,
             (
                 f"RISK: Portfolio exposure would become "
-                f"{proposed_exposure * 100:.1f}%, above the "
-                f"{max_exposure_weight * 100:.1f}% limit."
+                f"{proposed_exposure:.1%}, above the "
+                f"{max_exposure_weight:.1%} limit."
             ),
         )
 
@@ -153,7 +195,7 @@ def check_max_portfolio_exposure(
         True,
         (
             f"RISK APPROVED: Proposed portfolio exposure "
-            f"{proposed_exposure * 100:.1f}%."
+            f"{proposed_exposure:.1%}."
         ),
     )
 
@@ -164,6 +206,7 @@ def check_daily_realized_loss(
     equity: float,
     max_daily_loss_weight: float = 0.02,
 ) -> RiskDecision:
+
     if equity <= 0:
         return RiskDecision(
             False,
@@ -187,15 +230,17 @@ def check_daily_realized_loss(
         * float(max_daily_loss_weight)
     )
 
-    if float(today_realized_pnl) <= -loss_limit:
+    realised_pnl = float(today_realized_pnl)
+
+    if realised_pnl <= -loss_limit:
         return RiskDecision(
             False,
             (
                 f"RISK: Today's realised P/L is "
-                f"£{float(today_realized_pnl):.2f}. "
+                f"£{realised_pnl:.2f}. "
                 f"The daily realised-loss limit is "
                 f"£{loss_limit:.2f} "
-                f"({max_daily_loss_weight * 100:.1f}% of equity). "
+                f"({max_daily_loss_weight:.1%} of equity). "
                 f"New BUY orders are blocked."
             ),
         )
@@ -204,31 +249,35 @@ def check_daily_realized_loss(
         True,
         (
             f"RISK APPROVED: Today's realised P/L is "
-            f"£{float(today_realized_pnl):.2f}; "
-            f"daily loss limit is £{loss_limit:.2f}."
+            f"£{realised_pnl:.2f}; daily loss limit is "
+            f"£{loss_limit:.2f}."
         ),
     )
 
 
 def _pending_symbol(pending_order: dict) -> str:
     """
-    Extract a broker ticker/symbol from a Trading 212 pending-order payload.
+    Extract and normalise the ticker from a Trading 212 pending-order
+    payload.
 
-    Trading 212 payloads may expose the ticker directly or inside
-    the nested instrument object.
+    Example:
+
+        ADP_US_EQ -> ADP
     """
 
     if not isinstance(pending_order, dict):
         return ""
 
+    # Normal Trading 212 order response.
     direct = (
         pending_order.get("ticker")
         or pending_order.get("symbol")
     )
 
     if direct:
-        return str(direct).upper()
+        return _normalise_ticker(direct)
 
+    # Nested instrument response.
     instrument = pending_order.get("instrument")
 
     if isinstance(instrument, dict):
@@ -238,21 +287,20 @@ def _pending_symbol(pending_order: dict) -> str:
         )
 
         if nested:
-            value = str(nested).strip().upper()
-            return value.split("_")[0] if "_" in value else value
+            return _normalise_ticker(nested)
 
-    # Some endpoints/wrappers may return an order envelope.
+    # Defensive support for an order envelope.
     nested_order = pending_order.get("order")
 
     if isinstance(nested_order, dict):
+
         direct = (
             nested_order.get("ticker")
             or nested_order.get("symbol")
         )
 
         if direct:
-            value = str(direct).strip().upper()
-            return value.split("_")[0] if "_" in value else value
+            return _normalise_ticker(direct)
 
         instrument = nested_order.get("instrument")
 
@@ -263,7 +311,7 @@ def _pending_symbol(pending_order: dict) -> str:
             )
 
             if nested:
-                return str(nested).upper()
+                return _normalise_ticker(nested)
 
     return ""
 
@@ -273,23 +321,26 @@ def check_duplicate_order(
     pending_orders,
 ) -> RiskDecision:
     """
-    Block ANY new order for a ticker that already has a pending broker order.
-
-    This is intentionally stricter than the earlier same-direction rule.
+    Block ANY new order for a ticker that already has a pending
+    Trading 212 order.
 
     Examples:
-        pending AMD BUY + new AMD BUY  -> BLOCKED
-        pending AMD BUY + new AMD SELL -> BLOCKED
-        pending AMD SELL + new AMD BUY -> BLOCKED
-        pending AMD SELL + new AMD SELL -> BLOCKED
 
-    The existing pending order must resolve/cancel before GainZ can approve
-    another order for that ticker.
+        pending AMD_US_EQ BUY + new AMD BUY
+            -> BLOCKED
+
+        pending AMD_US_EQ BUY + new AMD SELL
+            -> BLOCKED
+
+    This is deliberately stricter than checking only the direction.
     """
 
-    order_symbol = str(order.symbol).upper()
+    order_symbol = _normalise_ticker(
+        order.symbol
+    )
 
-    for pending_order in pending_orders:
+    for pending_order in pending_orders or []:
+
         pending_symbol = _pending_symbol(
             pending_order
         )
@@ -298,20 +349,22 @@ def check_duplicate_order(
             continue
 
         if pending_symbol == order_symbol:
+
             return RiskDecision(
                 False,
                 (
-                    f"RISK: {order.symbol} already has a pending "
-                    f"Trading 212 order. New {str(order.side).upper()} "
-                    f"is blocked until the existing order resolves."
+                    f"RISK: {order_symbol} already has a "
+                    f"pending Trading 212 order. New "
+                    f"{str(order.side).upper()} is blocked "
+                    f"until the existing order resolves."
                 ),
             )
 
     return RiskDecision(
         True,
         (
-            f"RISK APPROVED: No pending Trading 212 order "
-            f"for {order.symbol}."
+            f"RISK APPROVED: No pending Trading 212 "
+            f"order for {order_symbol}."
         ),
     )
 
@@ -320,16 +373,9 @@ def check_same_run_duplicate(
     order,
     seen_orders,
 ) -> RiskDecision:
-    """
-    Prevent the same symbol + direction from being processed twice
-    during one execution run.
-
-    Opposite directions remain distinct here because broker-level
-    pending-order conflict protection is handled separately.
-    """
 
     key = (
-        str(order.symbol).upper(),
+        _normalise_ticker(order.symbol),
         str(order.side).upper(),
     )
 
