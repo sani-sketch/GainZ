@@ -1,6 +1,7 @@
 import json
 import os
 import matplotlib.pyplot as plt
+import plotly.graph_objects as go
 import subprocess
 import sys
 from pathlib import Path
@@ -14,6 +15,7 @@ from portfolio.history import (
     load_portfolio_history,
     calculate_daily_performance,
 )
+from portfolio.realized_pnl import calculate_realized_pnl
 
 from broker.trading212 import Trading212Broker
 
@@ -67,6 +69,27 @@ def get_historical_orders():
     return broker.historical_orders()
 
 
+@st.cache_data(ttl=CACHE_TTL)
+def get_isa_account_summary():
+    """Read Trading 212 Stocks ISA account summary. Read only."""
+    broker = Trading212Broker(environment="isa")
+    return broker.account_summary()
+
+
+@st.cache_data(ttl=CACHE_TTL)
+def get_isa_raw_positions():
+    """Read Trading 212 Stocks ISA positions. Read only."""
+    broker = Trading212Broker(environment="isa")
+    return broker.raw_positions()
+
+
+@st.cache_data(ttl=CACHE_TTL)
+def get_isa_orders():
+    """Read Trading 212 Stocks ISA pending orders. Read only."""
+    broker = Trading212Broker(environment="isa")
+    return broker.orders()
+
+
 # ============================================================
 # GENERAL HELPERS
 # ============================================================
@@ -74,6 +97,18 @@ def get_historical_orders():
 def credentials_present():
     key = os.getenv("TRADING212_API_KEY")
     secret = os.getenv("TRADING212_API_SECRET")
+
+    return bool(
+        key
+        and secret
+        and key != "replace_me"
+        and secret != "replace_me"
+    )
+
+
+def isa_credentials_present():
+    key = os.getenv("TRADING212_ISA_API_KEY")
+    secret = os.getenv("TRADING212_ISA_API_SECRET")
 
     return bool(
         key
@@ -97,11 +132,17 @@ def load_report():
         return {}
 
 
-def run_gainz(execute_demo=False):
+def run_gainz(execute_demo=False, investment_amount=None):
     command = [
         sys.executable,
         str(RUNNER_PATH),
     ]
+
+    if investment_amount is not None:
+        command.extend([
+            "--investment-amount",
+            str(float(investment_amount)),
+        ])
 
     if execute_demo:
         command.append("--execute-demo")
@@ -308,6 +349,139 @@ def extract_position_currency(position):
         )
 
     return ""
+
+
+def extract_position_isin(position):
+    instrument = position.get("instrument", {}) or {}
+    if isinstance(instrument, dict):
+        return str(instrument.get("isin", "") or "").strip()
+    return ""
+
+
+def ticker_logo_url(position):
+    """
+    Real security/provider logo via Parqet.
+    Prefer ISIN because it works better for ETFs and non-US listings.
+    """
+    isin = extract_position_isin(position)
+    symbol = extract_position_symbol(position)
+
+    if isin:
+        return (
+            "https://assets.parqet.com/logos/isin/"
+            f"{isin}?format=png&size=96"
+        )
+
+    if symbol and symbol != "Unknown":
+        return (
+            "https://assets.parqet.com/logos/symbol/"
+            f"{symbol}?format=png&size=96"
+        )
+
+    return ""
+
+
+def symbol_logo_url(symbol):
+    """Return a real company/security logo URL for a plain ticker symbol."""
+    symbol = symbol_from_ticker(symbol)
+
+    if not symbol or symbol == "Unknown":
+        return ""
+
+    return (
+        "https://assets.parqet.com/logos/symbol/"
+        f"{symbol}?format=png&size=96"
+    )
+
+
+def ticker_logo_html(symbol, size=28):
+    """HTML logo with a clean ticker fallback if the remote image fails."""
+    clean_symbol = symbol_from_ticker(symbol)
+    logo = symbol_logo_url(clean_symbol)
+
+    if not logo:
+        return (
+            f'<span class="sf-inline-logo-fallback">'
+            f'{html.escape(clean_symbol[:2])}</span>'
+        )
+
+    return (
+        f'<img class="sf-inline-ticker-logo" '
+        f'style="width:{int(size)}px;height:{int(size)}px;" '
+        f'src="{html.escape(logo)}" '
+        f'alt="{html.escape(clean_symbol)} logo" '
+        f'onerror="this.style.display=\'none\';" />'
+    )
+
+
+def add_logo_column(df, ticker_column="Ticker"):
+    """Add a real-logo image column to a dataframe containing tickers."""
+    if df is None or df.empty or ticker_column not in df.columns:
+        return df
+
+    result = df.copy()
+    result.insert(
+        0,
+        "Logo",
+        result[ticker_column].map(symbol_logo_url),
+    )
+    return result
+
+
+LOGO_COLUMN_CONFIG = {
+    "Logo": st.column_config.ImageColumn(
+        " ",
+        width="small",
+    )
+}
+
+
+def render_holding_card(position, portfolio_total, currency_symbol="£"):
+    symbol = extract_position_symbol(position)
+    name = extract_position_name(position) or symbol
+    logo = ticker_logo_url(position)
+
+    quantity = float_value(position.get("quantity"))
+    wallet = position.get("walletImpact", {}) or {}
+    value = float_value(wallet.get("currentValue"))
+    pnl = float_value(wallet.get("unrealizedProfitLoss"))
+    cost = float_value(wallet.get("totalCost"))
+    return_pct = (pnl / cost * 100) if cost else 0.0
+    weight = (value / portfolio_total * 100) if portfolio_total else 0.0
+
+    pnl_class = "sf-green" if pnl >= 0 else "sf-red"
+    logo_html = (
+        f'<img class="sf-ticker-logo" src="{html.escape(logo)}" '
+        f'alt="{html.escape(symbol)} logo" />'
+        if logo
+        else f'<div class="sf-logo-fallback">{html.escape(symbol[:2])}</div>'
+    )
+
+    st.markdown(
+        f"""
+        <div class="sf-holding-card">
+            <div class="sf-holding-left">
+                {logo_html}
+                <div>
+                    <div class="sf-holding-symbol">{html.escape(symbol)}</div>
+                    <div class="sf-holding-name">{html.escape(name)}</div>
+                    <div class="sf-holding-meta">
+                        {quantity:,.6f} units • {weight:.1f}% of portfolio
+                    </div>
+                </div>
+            </div>
+            <div class="sf-holding-right">
+                <div class="sf-holding-value">
+                    {currency_symbol}{value:,.2f}
+                </div>
+                <div class="{pnl_class}">
+                    {currency_symbol}{pnl:+,.2f} • {return_pct:+.2f}%
+                </div>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 # ============================================================
@@ -836,6 +1010,173 @@ st.markdown(
         font-size: .82rem;
         margin-top: .35rem;
     }
+
+    .sf-holding-card {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 1rem;
+        padding: .95rem 1rem;
+        margin: .55rem 0;
+        border: 1px solid var(--sf-border);
+        border-radius: 14px;
+        background: linear-gradient(145deg, rgba(17,24,32,.97), rgba(10,15,21,.97));
+        transition: transform .16s ease, border-color .16s ease;
+    }
+
+    .sf-holding-card:hover {
+        transform: translateY(-2px);
+        border-color: rgba(220,225,232,.34);
+    }
+
+    .sf-holding-left {
+        display: flex;
+        align-items: center;
+        gap: .85rem;
+        min-width: 0;
+    }
+
+    .sf-ticker-logo, .sf-logo-fallback {
+        width: 44px;
+        height: 44px;
+        border-radius: 12px;
+        background: #f4f5f7;
+        object-fit: contain;
+        padding: 5px;
+        flex: 0 0 44px;
+    }
+
+    .sf-logo-fallback {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        color: #111820;
+        font-weight: 800;
+        padding: 0;
+    }
+
+    .sf-inline-ticker-logo, .sf-inline-logo-fallback {
+        width: 28px;
+        height: 28px;
+        border-radius: 8px;
+        background: #f4f5f7;
+        object-fit: contain;
+        padding: 3px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        vertical-align: middle;
+        margin-right: .45rem;
+    }
+
+    .sf-inline-logo-fallback {
+        color: #111820;
+        font-size: .62rem;
+        font-weight: 800;
+        padding: 0;
+    }
+
+    .sf-holding-symbol {
+        color: #f2f4f7;
+        font-size: .98rem;
+        font-weight: 700;
+    }
+
+    .sf-holding-name {
+        color: #aab3bf;
+        font-size: .80rem;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        max-width: 420px;
+    }
+
+    .sf-holding-meta {
+        color: #6f7c8c;
+        font-size: .72rem;
+        margin-top: .15rem;
+    }
+
+    .sf-holding-right {
+        text-align: right;
+        white-space: nowrap;
+        font-size: .82rem;
+    }
+
+    .sf-holding-value {
+        color: #f2f4f7;
+        font-size: 1rem;
+        font-weight: 700;
+        margin-bottom: .12rem;
+    }
+
+    .sf-live-pill {
+        display: inline-block;
+        padding: .32rem .62rem;
+        border-radius: 999px;
+        color: #ffcb6b;
+        background: rgba(255,203,107,.08);
+        border: 1px solid rgba(255,203,107,.22);
+        font-size: .72rem;
+        font-weight: 700;
+        letter-spacing: .04em;
+    }
+
+    .sf-invest-hero {
+        margin-top: .75rem;
+        padding: 1.55rem 1.6rem 1.25rem 1.6rem;
+        border: 1px solid rgba(220,225,232,.18);
+        border-radius: 20px;
+        background:
+            radial-gradient(circle at 50% 0%, rgba(36,224,164,.08), transparent 45%),
+            linear-gradient(145deg, rgba(17,24,32,.99), rgba(8,13,19,.99));
+        text-align: center;
+        box-shadow: 0 18px 50px rgba(0,0,0,.20);
+    }
+
+    .sf-invest-kicker {
+        color: #42e7b1;
+        font-size: .72rem;
+        font-weight: 800;
+        letter-spacing: .14em;
+        text-transform: uppercase;
+        margin-bottom: .35rem;
+    }
+
+    .sf-invest-title {
+        color: #f2f4f7;
+        font-size: 1.65rem;
+        font-weight: 700;
+        letter-spacing: -.03em;
+    }
+
+    .sf-invest-copy {
+        color: #8f9aaa;
+        font-size: .86rem;
+        margin-top: .35rem;
+        margin-bottom: .35rem;
+    }
+
+    div[data-testid="stNumberInput"] input {
+        font-size: 2rem !important;
+        font-weight: 750 !important;
+        text-align: center !important;
+        min-height: 68px !important;
+        border-radius: 15px !important;
+    }
+
+    div[data-testid="stNumberInput"] label {
+        text-align: center;
+        width: 100%;
+        font-weight: 700;
+    }
+
+    .sf-invest-note {
+        color: #758190;
+        text-align: center;
+        font-size: .75rem;
+        margin-top: .35rem;
+    }
     </style>
     """,
     unsafe_allow_html=True,
@@ -861,6 +1202,7 @@ nav_page = st.sidebar.radio(
         "Orders",
         "Performance",
         "Risk & Controls",
+        "Stocks ISA",
         "System",
     ],
     label_visibility="collapsed",
@@ -882,12 +1224,24 @@ st.sidebar.caption("SF ALPHA • TEST ENVIRONMENT")
 # HEADER
 # ============================================================
 
+topbar_environment = (
+    "● Trading 212 Stocks ISA"
+    if nav_page == "Stocks ISA"
+    else "● Trading 212 Practice"
+)
+
+topbar_lock = (
+    "🔒 ISA order submission locked"
+    if nav_page == "Stocks ISA"
+    else "🔒 Real money locked"
+)
+
 st.markdown(
-    """
+    f"""
     <div class="sf-topbar">
         <div class="sf-search">⌕ &nbsp; Search stocks, ETFs, or insights...</div>
-        <div class="sf-env">● Trading 212 Practice</div>
-        <div class="sf-lock">🔒 Real money locked</div>
+        <div class="sf-env">{topbar_environment}</div>
+        <div class="sf-lock">{topbar_lock}</div>
     </div>
     """,
     unsafe_allow_html=True,
@@ -972,6 +1326,7 @@ account = account or {}
 raw_positions = raw_positions or []
 broker_orders = broker_orders or []
 historical_orders = historical_orders or []
+
 # ============================================================
 # PREVIEW DATA
 # ============================================================
@@ -1099,6 +1454,9 @@ unrealized_ppl = extract_unrealized_ppl(
 total_ppl = extract_total_ppl(
     account
 )
+
+# Broker-native realised P/L from historical filled SELL orders.
+realized_analysis = calculate_realized_pnl(historical_orders)
 
 open_position_count = len(
     raw_positions
@@ -1276,47 +1634,73 @@ if nav_page == "Dashboard":
                     ["portfolio_value"]
                 ]
 
-                fig, ax = plt.subplots(figsize=(10, 4))
-                fig.patch.set_alpha(0)
-                ax.set_facecolor("none")
+                fig = go.Figure()
 
-                ax.plot(
-                    chart_df.index,
-                    chart_df["portfolio_value"],
-                    linewidth=2,
+                fig.add_trace(
+                    go.Scatter(
+                        x=chart_df.index,
+                        y=chart_df["portfolio_value"],
+                        mode="lines+markers",
+                        name="Portfolio Value",
+                        line=dict(width=2.5),
+                        marker=dict(size=6),
+                        fill="tozeroy",
+                        fillcolor="rgba(120, 130, 145, 0.08)",
+                        hovertemplate=(
+                            "<b>%{x|%d %b %Y}</b><br>"
+                            + currency_symbol
+                            + "%{y:,.2f}<extra></extra>"
+                        ),
+                    )
                 )
 
                 min_value = chart_df["portfolio_value"].min()
                 max_value = chart_df["portfolio_value"].max()
                 movement = max_value - min_value
-
                 padding = max(
                     movement * 0.35,
                     max_value * 0.002,
                     5,
                 )
 
-                ax.set_ylim(
-                    min_value - padding,
-                    max_value + padding,
+                fig.update_layout(
+                    height=390,
+                    margin=dict(l=8, r=8, t=20, b=8),
+                    paper_bgcolor="rgba(0,0,0,0)",
+                    plot_bgcolor="rgba(0,0,0,0)",
+                    hovermode="x unified",
+                    showlegend=False,
+                    xaxis=dict(
+                        showgrid=False,
+                        rangeslider=dict(visible=False),
+                        rangeselector=dict(
+                            buttons=[
+                                dict(count=7, label="1W", step="day", stepmode="backward"),
+                                dict(count=1, label="1M", step="month", stepmode="backward"),
+                                dict(count=3, label="3M", step="month", stepmode="backward"),
+                                dict(count=1, label="1Y", step="year", stepmode="backward"),
+                                dict(label="ALL", step="all"),
+                            ]
+                        ),
+                    ),
+                    yaxis=dict(
+                        range=[
+                            min_value - padding,
+                            max_value + padding,
+                        ],
+                        gridcolor="rgba(192,200,210,.08)",
+                        title=f"Portfolio Value ({currency_symbol})",
+                    ),
                 )
 
-                ax.set_ylabel(
-                    f"Portfolio Value ({currency_symbol})"
-                )
-                ax.set_xlabel("")
-                ax.grid(True, alpha=0.12)
-                ax.spines["top"].set_visible(False)
-                ax.spines["right"].set_visible(False)
-
-                fig.autofmt_xdate()
-
-                st.pyplot(
+                st.plotly_chart(
                     fig,
-                    use_container_width=True,
+                    width='stretch',
+                    config={
+                        "displaylogo": False,
+                        "scrollZoom": True,
+                    },
                 )
-
-                plt.close(fig)
 
                 first_value = history_df["portfolio_value"].iloc[0]
                 latest_value = history_df["portfolio_value"].iloc[-1]
@@ -1451,7 +1835,7 @@ if nav_page == "Dashboard":
 
                 st.pyplot(
                     fig,
-                    use_container_width=True,
+                    width='stretch',
                 )
 
                 plt.close(fig)
@@ -1464,12 +1848,18 @@ if nav_page == "Dashboard":
                     lambda x: f"{x * 100:.1f}%"
                 )
 
+                allocation_display = add_logo_column(
+                    allocation_display,
+                    "Ticker",
+                )
+
                 st.dataframe(
                     allocation_display[
-                        ["Ticker", "Weight"]
+                        ["Logo", "Ticker", "Weight"]
                     ].head(6),
-                    use_container_width=True,
+                    width='stretch',
                     hide_index=True,
+                    column_config=LOGO_COLUMN_CONFIG,
                 )
 
             else:
@@ -1537,9 +1927,9 @@ if nav_page == "Dashboard":
                     else "sf-badge-buy"
                 )
 
-                ticker = html.escape(
-                    str(row.get("Ticker", ""))
-                )
+                raw_ticker = str(row.get("Ticker", ""))
+                ticker = html.escape(raw_ticker)
+                ticker_logo = ticker_logo_html(raw_ticker)
 
                 qty = float_value(
                     row.get("Qty", 0)
@@ -1555,7 +1945,8 @@ if nav_page == "Dashboard":
                         <span class="{badge_class}">
                             {html.escape(side or "—")}
                         </span>
-                        <span>
+                        <span style="display:flex;align-items:center;">
+                            {ticker_logo}
                             <strong>{ticker}</strong>
                         </span>
                         <span>{qty:g}</span>
@@ -1625,37 +2016,640 @@ if nav_page == "Dashboard":
         )
 
 
+if nav_page == "Portfolio":
+    st.divider()
+    st.subheader("Practice Portfolio")
+
+    st.markdown("### Invest with GainZ")
+    st.caption(
+        "Practice / Demo only. You choose the capital amount; "
+        "GainZ chooses the BUY-only allocation."
+    )
+
+    st.markdown(
+        """
+        <div class="sf-invest-hero">
+            <div class="sf-invest-kicker">✦ GainZ Practice Allocation</div>
+            <div class="sf-invest-title">How much do you want to invest?</div>
+            <div class="sf-invest-copy">
+                Build and risk-check a new-cash portfolio before submitting any Practice orders.
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    if "practice_gainz_invest_amount" not in st.session_state:
+        st.session_state["practice_gainz_invest_amount"] = 0.0
+
+    def set_practice_amount(amount):
+        st.session_state["practice_gainz_invest_amount"] = float(amount)
+
+    q1, q2, q3, q4 = st.columns(4)
+
+    q1.button(
+        "£100",
+        key="practice_quick_100",
+        width='stretch',
+        on_click=set_practice_amount,
+        args=(100.0,),
+    )
+    q2.button(
+        "£250",
+        key="practice_quick_250",
+        width='stretch',
+        on_click=set_practice_amount,
+        args=(250.0,),
+    )
+    q3.button(
+        "£500",
+        key="practice_quick_500",
+        width='stretch',
+        on_click=set_practice_amount,
+        args=(500.0,),
+    )
+    q4.button(
+        "MAX CASH",
+        key="practice_quick_max",
+        width='stretch',
+        on_click=set_practice_amount,
+        args=(float(cash_available),),
+    )
+
+    practice_amount = st.number_input(
+        "Practice investment amount (£)",
+        min_value=0.0,
+        step=50.0,
+        format="%.2f",
+        key="practice_gainz_invest_amount",
+    )
+
+    if st.button(
+        "✦ BUILD MY PORTFOLIO",
+        key="practice_build_gainz_portfolio",
+        width='stretch',
+        type="primary",
+    ):
+        if practice_amount <= 0:
+            st.error("Enter an investment amount greater than £0.")
+        elif practice_amount > cash_available:
+            st.error(
+                f"That amount is above the Practice cash currently available "
+                f"({currency_symbol}{cash_available:,.2f})."
+            )
+        else:
+            with st.spinner("GainZ is building and risk-checking the Practice portfolio..."):
+                preview_result = run_gainz(
+                    execute_demo=False,
+                    investment_amount=practice_amount,
+                )
+
+            if not preview_result["success"]:
+                st.error("GainZ could not build the Practice portfolio.")
+                st.code(preview_result["stderr"] or preview_result["stdout"])
+            else:
+                fresh_report = load_report()
+                st.session_state["practice_gainz_preview"] = {
+                    "amount": float(practice_amount),
+                    "report": fresh_report,
+                }
+                st.rerun()
+
+    practice_preview = st.session_state.get("practice_gainz_preview")
+
+    if practice_preview:
+        preview_report = practice_preview.get("report", {}) or {}
+        preview_orders = preview_report.get("orders", []) or []
+        preview_amount = float(practice_preview.get("amount", 0.0))
+
+        approved_orders = [
+            row for row in preview_orders
+            if str(row.get("status", "")).upper() == "DRY_RUN_APPROVED"
+        ]
+        blocked_orders = [
+            row for row in preview_orders
+            if str(row.get("status", "")).upper() == "BLOCKED"
+        ]
+        target_weights_preview = preview_report.get("target_weights", {}) or {}
+        planned_stock_value = preview_amount * sum(
+            max(float_value(weight), 0.0)
+            for weight in target_weights_preview.values()
+        )
+        planned_stock_value = min(planned_stock_value, preview_amount)
+        reserve = max(preview_amount - planned_stock_value, 0.0)
+
+        st.markdown("### Practice Investment Preview")
+        st.caption(
+            "No order has been submitted. Existing holdings are used for risk checks "
+            "but are not sold by this new-cash action."
+        )
+
+        p1, p2, p3, p4 = st.columns(4)
+        p1.metric("Capital Assigned", f"{currency_symbol}{preview_amount:,.2f}")
+        p2.metric("Planned for Stocks", f"{currency_symbol}{planned_stock_value:,.2f}")
+        p3.metric("GainZ Cash Reserve", f"{currency_symbol}{reserve:,.2f}")
+        p4.metric("Risk Approved", f"{len(approved_orders)}/{len(preview_orders)}")
+
+        if preview_orders:
+            preview_df = pd.DataFrame(preview_orders)
+            display_df = pd.DataFrame({
+                "Ticker": preview_df["symbol"],
+                "Side": preview_df.get("side", pd.Series(["BUY"] * len(preview_df))),
+                "Quantity": preview_df["quantity"].map(lambda x: f"{float_value(x):.6f}"),
+                "Risk Status": preview_df["status"],
+                "Risk Message": preview_df["message"],
+            })
+            display_df = add_logo_column(
+                display_df,
+                "Ticker",
+            )
+            st.dataframe(
+                display_df,
+                hide_index=True,
+                width='stretch',
+                column_config=LOGO_COLUMN_CONFIG,
+            )
+
+        if blocked_orders:
+            st.error(
+                f"{len(blocked_orders)} proposed order(s) were blocked by the risk engine. "
+                "Practice execution is disabled until the preview is fully approved."
+            )
+        elif approved_orders and len(approved_orders) == len(preview_orders):
+            st.success(
+                "All proposed Practice BUY orders passed the current execution risk checks."
+            )
+
+            confirm = st.checkbox(
+                "I understand this will submit Practice/Demo orders to Trading 212.",
+                key="practice_confirm_checkbox",
+            )
+
+            if st.button(
+                "CONFIRM PRACTICE INVESTMENT",
+                key="practice_confirm_investment",
+                width='stretch',
+                type="primary",
+                disabled=not confirm,
+            ):
+                with st.spinner("Submitting Practice orders..."):
+                    execution_result = run_gainz(
+                        execute_demo=True,
+                        investment_amount=preview_amount,
+                    )
+
+                if execution_result["success"]:
+                    executed_report = load_report()
+                    execution_orders = executed_report.get("orders", []) or []
+
+                    accepted_statuses = {
+                        "SUBMITTED",
+                        "FILLED",
+                        "ACCEPTED",
+                        "PENDING",
+                    }
+                    failed_statuses = {
+                        "BLOCKED",
+                        "REJECTED",
+                        "FAILED",
+                        "ERROR",
+                    }
+
+                    accepted_orders = [
+                        row for row in execution_orders
+                        if str(row.get("status", "")).upper() in accepted_statuses
+                    ]
+                    failed_orders = [
+                        row for row in execution_orders
+                        if str(row.get("status", "")).upper() in failed_statuses
+                    ]
+                    unknown_orders = [
+                        row for row in execution_orders
+                        if str(row.get("status", "")).upper()
+                        not in accepted_statuses | failed_statuses
+                    ]
+
+                    if execution_orders:
+                        st.dataframe(
+                            pd.DataFrame(execution_orders),
+                            hide_index=True,
+                            width='stretch',
+                        )
+
+                    if (
+                        execution_orders
+                        and len(accepted_orders) == len(execution_orders)
+                        and not failed_orders
+                        and not unknown_orders
+                    ):
+                        st.session_state.pop("practice_gainz_preview", None)
+                        get_account_summary.clear()
+                        get_raw_positions.clear()
+                        get_orders.clear()
+                        get_historical_orders.clear()
+
+                        st.success(
+                            f"Trading 212 returned an accepted/submitted status "
+                            f"for all {len(accepted_orders)} Practice order(s). "
+                            f"Check Trading 212 History for final fill confirmation."
+                        )
+                    else:
+                        st.error(
+                            "Practice execution was NOT verified as fully submitted. "
+                            "The preview has been kept. Do not retry until these "
+                            "results are reviewed."
+                        )
+                        st.caption(
+                            f"Accepted/submitted: {len(accepted_orders)} · "
+                            f"Blocked/failed: {len(failed_orders)} · "
+                            f"Unknown: {len(unknown_orders)}"
+                        )
+
+                        diagnostic = (
+                            execution_result.get("stderr")
+                            or execution_result.get("stdout")
+                        )
+                        if diagnostic:
+                            with st.expander("Execution diagnostics"):
+                                st.code(diagnostic)
+                else:
+                    st.error(
+                        "Practice execution process failed. No successful "
+                        "submission is being reported, and the preview has "
+                        "been kept."
+                    )
+                    st.code(
+                        execution_result.get("stderr")
+                        or execution_result.get("stdout")
+                        or "No subprocess diagnostic output was returned."
+                    )
+
+        if st.button(
+            "Clear Practice Preview",
+            key="practice_clear_preview",
+            width='stretch',
+        ):
+            st.session_state.pop("practice_gainz_preview", None)
+            st.rerun()
+
+    st.warning(
+        "🧪 PRACTICE / DEMO ONLY — this page cannot submit Stocks ISA real-money orders."
+    )
+
+
 if nav_page == "Performance":
     # ============================================================
     # PERFORMANCE
     # ============================================================
 
     st.divider()
-
     st.subheader("Performance")
 
-    p1, p2, p3, p4 = st.columns(4)
+    daily_equity = calculate_daily_performance()
+    realised_daily = realized_analysis.get("daily", [])
+    realised_trades = realized_analysis.get("trades", [])
 
-    p1.metric(
+    # ------------------------------------------------------------
+    # TOP KPIs
+    # ------------------------------------------------------------
+
+    latest_equity_change = (
+        float(daily_equity[-1].get("daily_pnl", 0.0))
+        if daily_equity else 0.0
+    )
+
+    latest_equity_return = (
+        float(daily_equity[-1].get("daily_return", 0.0))
+        if daily_equity else 0.0
+    )
+
+    broker_history_realised = float(
+        realized_analysis.get("total_realized_pnl", 0.0)
+    )
+
+    k1, k2, k3, k4 = st.columns(4)
+
+    k1.metric(
+        "Broker Realised P/L",
+        f"{currency_symbol}{broker_history_realised:,.2f}",
+    )
+
+    k2.metric(
         "Unrealised P/L",
         f"{currency_symbol}{unrealized_ppl:,.2f}",
     )
 
-    p2.metric(
-        "Realised P/L",
-        f"{currency_symbol}{realized_ppl:,.2f}",
-    )
-
-    p3.metric(
+    k3.metric(
         "Total P/L",
         f"{currency_symbol}{total_ppl:,.2f}",
     )
 
-    p4.metric(
+    k4.metric(
         "Portfolio Value",
-        f"{currency_symbol}{investment_value:,.2f}",
+        f"{currency_symbol}{total_account_value:,.2f}",
     )
 
+    st.caption(
+        "Realised P/L uses Trading 212's broker-reported realisedProfitLoss "
+        "from filled SELL transactions. Portfolio/equity change is shown "
+        "separately and is not treated as realised trading profit."
+    )
+
+    # ------------------------------------------------------------
+    # DAILY REALISED TRADING P/L
+    # ------------------------------------------------------------
+
+    st.markdown("### Daily Realised Trading P/L")
+
+    if realised_daily:
+        realised_df = pd.DataFrame(realised_daily)
+
+        realised_df["date"] = pd.to_datetime(
+            realised_df["date"],
+            errors="coerce",
+        )
+
+        realised_df["realized_pnl"] = pd.to_numeric(
+            realised_df["realized_pnl"],
+            errors="coerce",
+        ).fillna(0.0)
+
+        realised_df = (
+            realised_df
+            .dropna(subset=["date"])
+            .sort_values("date")
+        )
+
+        realised_df["cumulative_realized_pnl"] = (
+            realised_df["realized_pnl"].cumsum()
+        )
+
+        winning_days = int(
+            (realised_df["realized_pnl"] > 0).sum()
+        )
+        losing_days = int(
+            (realised_df["realized_pnl"] < 0).sum()
+        )
+
+        best_day = float(
+            realised_df["realized_pnl"].max()
+        )
+        worst_day = float(
+            realised_df["realized_pnl"].min()
+        )
+
+        r1, r2, r3, r4 = st.columns(4)
+
+        r1.metric(
+            "Winning Days",
+            winning_days,
+        )
+
+        r2.metric(
+            "Losing Days",
+            losing_days,
+        )
+
+        r3.metric(
+            "Best Realised Day",
+            f"{currency_symbol}{best_day:+,.2f}",
+        )
+
+        r4.metric(
+            "Worst Realised Day",
+            f"{currency_symbol}{worst_day:+,.2f}",
+        )
+
+        chart_daily = realised_df.set_index("date")[
+            ["realized_pnl"]
+        ].rename(
+            columns={"realized_pnl": "Daily Realised P/L"}
+        )
+
+        st.bar_chart(
+            chart_daily,
+            width="stretch",
+        )
+
+        st.markdown("### Cumulative Realised P/L")
+
+        chart_cumulative = realised_df.set_index("date")[
+            ["cumulative_realized_pnl"]
+        ].rename(
+            columns={
+                "cumulative_realized_pnl":
+                "Cumulative Realised P/L"
+            }
+        )
+
+        st.line_chart(
+            chart_cumulative,
+            width="stretch",
+        )
+
+        daily_table = realised_df.copy()
+        daily_table["Date"] = daily_table["date"].dt.strftime(
+            "%d %b %Y"
+        )
+        daily_table["Realised P/L"] = daily_table[
+            "realized_pnl"
+        ].map(
+            lambda value:
+            f"{currency_symbol}{value:+,.2f}"
+        )
+        daily_table["Cumulative P/L"] = daily_table[
+            "cumulative_realized_pnl"
+        ].map(
+            lambda value:
+            f"{currency_symbol}{value:+,.2f}"
+        )
+
+        st.dataframe(
+            daily_table[
+                ["Date", "Realised P/L", "Cumulative P/L"]
+            ],
+            hide_index=True,
+            width="stretch",
+        )
+
+    else:
+        st.info(
+            "No broker-reported realised SELL P/L is available yet."
+        )
+
+    # ------------------------------------------------------------
+    # PORTFOLIO / EQUITY HISTORY
+    # ------------------------------------------------------------
+
+    st.markdown("### Portfolio Equity History")
+
+    if daily_equity:
+        equity_df = pd.DataFrame(daily_equity)
+
+        equity_df["timestamp"] = pd.to_datetime(
+            equity_df["timestamp"],
+            utc=True,
+            errors="coerce",
+        )
+
+        equity_df["portfolio_value"] = pd.to_numeric(
+            equity_df["portfolio_value"],
+            errors="coerce",
+        )
+
+        equity_df["daily_pnl"] = pd.to_numeric(
+            equity_df["daily_pnl"],
+            errors="coerce",
+        ).fillna(0.0)
+
+        equity_df["daily_return"] = pd.to_numeric(
+            equity_df["daily_return"],
+            errors="coerce",
+        ).fillna(0.0)
+
+        equity_df = (
+            equity_df
+            .dropna(subset=["timestamp", "portfolio_value"])
+            .sort_values("timestamp")
+        )
+
+        e1, e2, e3 = st.columns(3)
+
+        e1.metric(
+            "Latest Equity Change",
+            f"{currency_symbol}{latest_equity_change:+,.2f}",
+        )
+
+        e2.metric(
+            "Latest Equity Return",
+            f"{latest_equity_return:+.2f}%",
+        )
+
+        e3.metric(
+            "Recorded Days",
+            len(equity_df),
+        )
+
+        equity_chart = equity_df.set_index("timestamp")[
+            ["portfolio_value"]
+        ].rename(
+            columns={"portfolio_value": "Portfolio Value"}
+        )
+
+        st.line_chart(
+            equity_chart,
+            width="stretch",
+        )
+
+        st.caption(
+            "Equity change measures changes in total portfolio value. "
+            "It is not the same as realised trading P/L and is not "
+            "cash-flow adjusted."
+        )
+
+    else:
+        st.info(
+            "Portfolio history will appear after daily snapshots "
+            "have been recorded."
+        )
+
+    # ------------------------------------------------------------
+    # RECENT REALISED TRADES
+    # ------------------------------------------------------------
+
+    st.markdown("### Recent Realised Trades")
+
+    if realised_trades:
+        trades_df = pd.DataFrame(realised_trades)
+
+        trades_df["filled_at"] = pd.to_datetime(
+            trades_df["filled_at"],
+            utc=True,
+            errors="coerce",
+        )
+
+        trades_df = trades_df.sort_values(
+            "filled_at",
+            ascending=False,
+        )
+
+        trades_df["Time"] = trades_df["filled_at"].dt.strftime(
+            "%d %b %Y %H:%M UTC"
+        )
+
+        trades_df["Ticker"] = (
+            trades_df["ticker"]
+            .astype(str)
+            .str.replace("_US_EQ", "", regex=False)
+        )
+
+        trades_df["Quantity"] = pd.to_numeric(
+            trades_df["quantity"],
+            errors="coerce",
+        ).map(
+            lambda value:
+            f"{value:,.4f}"
+            if pd.notna(value)
+            else "—"
+        )
+
+        trades_df["Proceeds"] = pd.to_numeric(
+            trades_df["proceeds"],
+            errors="coerce",
+        ).map(
+            lambda value:
+            f"{currency_symbol}{value:,.2f}"
+            if pd.notna(value)
+            else "—"
+        )
+
+        trades_df["Realised P/L"] = pd.to_numeric(
+            trades_df["realized_pnl"],
+            errors="coerce",
+        ).map(
+            lambda value:
+            f"{currency_symbol}{value:+,.2f}"
+            if pd.notna(value)
+            else "—"
+        )
+
+        trades_df["Fees"] = pd.to_numeric(
+            trades_df["fees"],
+            errors="coerce",
+        ).map(
+            lambda value:
+            f"{currency_symbol}{value:,.2f}"
+            if pd.notna(value)
+            else "—"
+        )
+
+        trades_display = trades_df[
+            [
+                "Time",
+                "Ticker",
+                "Quantity",
+                "Proceeds",
+                "Realised P/L",
+                "Fees",
+            ]
+        ].head(50).copy()
+        trades_display = add_logo_column(
+            trades_display,
+            "Ticker",
+        )
+
+        st.dataframe(
+            trades_display,
+            hide_index=True,
+            width="stretch",
+            column_config=LOGO_COLUMN_CONFIG,
+        )
+
+    else:
+        st.info(
+            "No filled SELL transactions with broker-reported "
+            "realised P/L were found."
+        )
 
 
 if nav_page == "Portfolio":
@@ -1798,10 +2792,16 @@ if nav_page == "Portfolio":
             performance_rows
         )
 
+        performance_df = add_logo_column(
+            performance_df,
+            "Ticker",
+        )
+
         st.dataframe(
             performance_df,
-            use_container_width=True,
+            width='stretch',
             hide_index=True,
+            column_config=LOGO_COLUMN_CONFIG,
         )
 
     else:
@@ -1920,10 +2920,16 @@ if nav_page == "Strategy":
                 target_rows
             )
 
-            st.dataframe(
+            target_display = add_logo_column(
                 target_df,
-                use_container_width=True,
+                "Ticker",
+            )
+
+            st.dataframe(
+                target_display,
+                width='stretch',
                 hide_index=True,
+                column_config=LOGO_COLUMN_CONFIG,
             )
 
             st.bar_chart(
@@ -1979,10 +2985,20 @@ if nav_page == "Orders":
                     existing_columns
                 ]
 
+            if "ticker" in orders_df.columns:
+                orders_df["Ticker"] = orders_df["ticker"].map(
+                    symbol_from_ticker
+                )
+                orders_df = add_logo_column(
+                    orders_df,
+                    "Ticker",
+                )
+
             st.dataframe(
                 orders_df,
-                use_container_width=True,
+                width='stretch',
                 hide_index=True,
+                column_config=LOGO_COLUMN_CONFIG,
             )
 
         else:
@@ -1995,413 +3011,544 @@ if nav_page == "Orders":
 
 
 if nav_page == "Risk & Controls":
-    # ============================================================
-    # MASTER SAFETY CONTROLS — PRACTICE ONLY
-    # ============================================================
-
     st.divider()
-    st.subheader("🛑 Emergency Controls")
-
-    paused = gainz_is_paused()
-
-    if paused:
-        st.warning(
-            "GainZ is PAUSED on this dashboard instance. Automatic execution "
-            "must also check this pause flag before it can be relied on as a "
-            "cross-system lock."
-        )
-    else:
-        st.success("GainZ dashboard pause is currently OFF.")
-
-    m1, m2 = st.columns(2)
-
-    with m1:
-        if not paused:
-            if st.button(
-                "⏸️ Pause GainZ",
-                use_container_width=True,
-                disabled=preview_mode,
-            ):
-                set_gainz_paused(True)
-                st.success("GainZ dashboard pause enabled.")
-                st.rerun()
-        else:
-            if st.button(
-                "▶️ Resume GainZ",
-                use_container_width=True,
-                disabled=preview_mode,
-            ):
-                set_gainz_paused(False)
-                st.success("GainZ dashboard pause removed.")
-                st.rerun()
-
-    with m2:
-        st.metric(
-            "Automation State",
-            "PAUSED" if paused else "ACTIVE",
-        )
-
+    st.subheader("Risk & Controls")
     st.caption(
-        "Important: Render and GitHub Actions run separately. This dashboard pause "
-        "is not yet a guaranteed GitHub Actions kill-switch. Do not rely on it to "
-        "block scheduled orders until we add a shared persistent pause state."
+        "Practice safety dashboard. These guardrails are display-only for now "
+        "and do not change order execution."
     )
 
-    st.markdown("#### 🚨 Sell Entire Practice Portfolio")
-
-    # ------------------------------------------------------------
-    # Calculate full-portfolio exit values directly from
-    # Trading 212 walletImpact data (GBP)
-    # ------------------------------------------------------------
-
-    portfolio_value_for_exit = 0.0
-    portfolio_cost_for_exit = 0.0
-    portfolio_profit_for_exit = 0.0
-
+    largest_position_value = 0.0
+    largest_position_symbol = "—"
     for position in raw_positions:
+        wallet = position.get("walletImpact", {}) or {}
+        value = float_value(wallet.get("currentValue", 0))
+        if value > largest_position_value:
+            largest_position_value = value
+            largest_position_symbol = extract_position_symbol(position)
 
-        wallet = position.get(
-            "walletImpact",
-            {},
-        ) or {}
+    largest_position_pct = (
+        largest_position_value / total_account_value * 100
+        if total_account_value > 0 else 0.0
+    )
+    exposure_pct = exposure * 100
 
-        portfolio_value_for_exit += float_value(
-            wallet.get(
-                "currentValue"
-            )
-        )
+    max_position_pct = 15.0
+    max_exposure_pct = 90.0
+    max_order_pct = 10.0
+    daily_loss_limit_pct = 3.0
 
-        portfolio_cost_for_exit += float_value(
-            wallet.get(
-                "totalCost"
-            )
-        )
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Portfolio Exposure", f"{exposure_pct:.1f}%")
+    c2.metric("Largest Position", f"{largest_position_pct:.1f}%", delta=largest_position_symbol, delta_color="off")
+    c3.metric("Pending Orders", pending_count)
+    c4.metric("Real-Money Trading", "LOCKED")
 
-        portfolio_profit_for_exit += float_value(
-            wallet.get(
-                "unrealizedProfitLoss"
-            )
-        )
+    st.markdown("### Safety Checks")
+    controls = [
+        {"Control": "Maximum position size", "Status": "PASS" if largest_position_pct <= max_position_pct else "REVIEW", "Current": f"{largest_position_pct:.1f}%", "Guardrail": f"≤ {max_position_pct:.0f}%", "Purpose": "Avoid too much money in one stock."},
+        {"Control": "Maximum portfolio exposure", "Status": "PASS" if exposure_pct <= max_exposure_pct else "REVIEW", "Current": f"{exposure_pct:.1f}%", "Guardrail": f"≤ {max_exposure_pct:.0f}%", "Purpose": "Keep the account from being fully invested."},
+        {"Control": "Maximum order value", "Status": "DISPLAY ONLY", "Current": "Not enforced", "Guardrail": f"≤ {max_order_pct:.0f}% of account", "Purpose": "Prevent unexpectedly large orders."},
+        {"Control": "Daily loss limit", "Status": "DISPLAY ONLY", "Current": "Not enforced", "Guardrail": f"{daily_loss_limit_pct:.0f}% stop", "Purpose": "Stop new trading after a large daily loss."},
+        {"Control": "Duplicate-order protection", "Status": "DISPLAY ONLY", "Current": "Not enforced", "Guardrail": "Block duplicates", "Purpose": "Prevent the same trade being sent twice."},
+        {"Control": "Pending-order protection", "Status": "CLEAR" if pending_count == 0 else "PENDING", "Current": f"{pending_count} pending", "Guardrail": "Review unresolved orders", "Purpose": "Avoid conflicting orders."},
+        {"Control": "Live trading lock", "Status": "LOCKED", "Current": "Practice only", "Guardrail": "Real money disabled", "Purpose": "Prevent accidental real-money execution."},
+    ]
+    st.dataframe(pd.DataFrame(controls), hide_index=True, width="stretch")
 
-
-    # ------------------------------------------------------------
-    # Portfolio return %
-    # ------------------------------------------------------------
-
-    if portfolio_cost_for_exit > 0:
-
-        portfolio_return_for_exit = (
-            portfolio_profit_for_exit
-            / portfolio_cost_for_exit
-        ) * 100
-
+    st.markdown("### Current Safety State")
+    if preview_mode:
+        st.info("Preview mode is active, so values may use sample data.")
+    elif account_error or positions_error:
+        st.warning("Some broker data could not refresh, so observations may use last-good data.")
     else:
+        st.success("Practice environment connected. Real-money execution remains locked.")
 
-        portfolio_return_for_exit = 0.0
-
-
-    # ------------------------------------------------------------
-    # Exit summary
-    # ------------------------------------------------------------
-
+    st.markdown("### Before Real Money")
     st.write(
-        f"Open positions: **{len(raw_positions)}**"
-    )
-
-    e1, e2, e3, e4 = st.columns(4)
-
-    e1.metric(
-        "Current Value",
-        f"{currency_symbol}{portfolio_value_for_exit:,.2f}",
-    )
-
-    e2.metric(
-        "Total Cost",
-        f"{currency_symbol}{portfolio_cost_for_exit:,.2f}",
-    )
-
-    e3.metric(
-        "Profit to Book",
-        f"{currency_symbol}{portfolio_profit_for_exit:,.2f}",
-        delta=f"{portfolio_return_for_exit:+.2f}%",
-    )
-
-    e4.metric(
-        "Est. Cash From Sale",
-        f"{currency_symbol}{portfolio_value_for_exit:,.2f}",
+        "Later, these guardrails can be moved into the execution path so every "
+        "proposed order must pass the risk engine before reaching Trading 212."
     )
 
 
-    # ------------------------------------------------------------
-    # Human-readable explanation
-    # ------------------------------------------------------------
-
-    if portfolio_profit_for_exit > 0:
-
-        st.success(
-            f"💰 If you sold the entire portfolio at approximately "
-            f"the current prices, you would book around "
-            f"{currency_symbol}{portfolio_profit_for_exit:,.2f} "
-            f"of profit ({portfolio_return_for_exit:+.2f}%)."
-        )
-
-    elif portfolio_profit_for_exit < 0:
-
-        st.warning(
-            f"⚠️ The portfolio currently has an unrealised loss of "
-            f"{currency_symbol}{abs(portfolio_profit_for_exit):,.2f} "
-            f"({portfolio_return_for_exit:+.2f}%). "
-            f"Selling everything now would approximately realise this loss."
-        )
-
-    else:
-
-        st.info(
-            "The portfolio is currently approximately at break-even."
-        )
-
-
+if nav_page == "Stocks ISA":
+    st.divider()
+    st.subheader("Stocks ISA — Real Money")
     st.caption(
-        "Estimate only. Final realised P/L can differ because market prices "
-        "and GBP/USD FX rates may change before the orders are filled."
+        "Live Trading 212 Stocks ISA data. "
+        "Order submission remains locked while the dashboard is validated."
     )
 
+    if preview_mode:
+        st.warning(
+            "Preview mode affects the Practice dashboard only. "
+            "The Stocks ISA page always uses the real ISA connection."
+        )
 
-    # ------------------------------------------------------------
-    # SELL ALL confirmation
-    # ------------------------------------------------------------
+    if not isa_credentials_present():
+        st.error(
+            "Stocks ISA credentials are missing. Add "
+            "TRADING212_ISA_API_KEY and TRADING212_ISA_API_SECRET "
+            "to the environment."
+        )
+    else:
+        isa_account, isa_account_error = fetch_with_fallback(
+            "last_good_isa_account",
+            get_isa_account_summary,
+        )
+        isa_positions, isa_positions_error = fetch_with_fallback(
+            "last_good_isa_positions",
+            get_isa_raw_positions,
+        )
+        isa_orders, isa_orders_error = fetch_with_fallback(
+            "last_good_isa_orders",
+            get_isa_orders,
+        )
 
-    sell_all_text = st.text_input(
-        "Type SELL ALL to unlock the full-portfolio exit",
-        key="sell_all_confirmation_text",
-        disabled=(
-            preview_mode
-            or not raw_positions
-            or pending_count > 0
-        ),
-    )
+        isa_account = isa_account or {}
+        isa_positions = isa_positions or []
+        isa_orders = isa_orders or []
 
-    sell_all_ack = st.checkbox(
-        "I understand this will submit SELL orders for every open "
-        "Trading 212 Practice position.",
-        key="sell_all_ack",
-        disabled=(
-            preview_mode
-            or not raw_positions
-            or pending_count > 0
-        ),
-    )
+        isa_currency = extract_currency(isa_account)
+        isa_symbol = "£" if isa_currency == "GBP" else isa_currency + " "
+        isa_total = extract_total_value(isa_account)
+        isa_cash = extract_cash(isa_account)
+        isa_invested = extract_investment_value(isa_account)
+        isa_realised = extract_realized_ppl(isa_account)
+        isa_unrealised = extract_unrealized_ppl(isa_account)
+        isa_total_pnl = isa_realised + isa_unrealised
+        isa_exposure = (
+            isa_invested / isa_total
+            if isa_total > 0
+            else 0.0
+        )
 
-
-    # ------------------------------------------------------------
-    # Final safety check
-    # ------------------------------------------------------------
-
-    sell_all_disabled = (
-        preview_mode
-        or not credentials_present()
-        or not raw_positions
-        or pending_count > 0
-        or sell_all_text.strip().upper() != "SELL ALL"
-        or not sell_all_ack
-    )
-
-
-    # ------------------------------------------------------------
-    # Execute SELL ALL
-    # ------------------------------------------------------------
-
-    if st.button(
-        "🚨 Close All Practice Positions",
-        type="primary",
-        use_container_width=True,
-        disabled=sell_all_disabled,
-    ):
-
-        # Pause locally before attempting liquidation
-        set_gainz_paused(True)
-
-        with st.spinner(
-            "Submitting Practice sell orders for all open positions..."
-        ):
-
-            results = submit_practice_sell_all(
-                raw_positions
-            )
-
-
-        if not results:
-
+        if isa_account_error:
             st.warning(
-                "No sellable Practice positions were found."
+                "The ISA account summary could not refresh. "
+                "Showing last-good data where available."
             )
 
-        else:
+        i1, i2, i3, i4 = st.columns(4)
+        i1.metric(
+            "ISA Value",
+            f"{isa_symbol}{isa_total:,.2f}",
+            delta=f"{isa_symbol}{isa_total_pnl:+,.2f} total P/L",
+        )
+        i2.metric(
+            "Available to Trade",
+            f"{isa_symbol}{isa_cash:,.2f}",
+        )
+        i3.metric(
+            "Invested",
+            f"{isa_symbol}{isa_invested:,.2f}",
+        )
+        i4.metric(
+            "Open Positions",
+            len(isa_positions),
+        )
 
-            result_df = pd.DataFrame(
-                results
+        p1, p2, p3 = st.columns(3)
+        p1.metric(
+            "Unrealised P/L",
+            f"{isa_symbol}{isa_unrealised:+,.2f}",
+        )
+        p2.metric(
+            "Realised P/L",
+            f"{isa_symbol}{isa_realised:+,.2f}",
+        )
+        p3.metric(
+            "Exposure",
+            f"{isa_exposure * 100:.1f}%",
+        )
+
+        st.markdown("### ISA Holdings")
+
+        isa_rows = []
+        for position in isa_positions:
+            ticker = extract_position_symbol(position)
+            company = extract_position_name(position)
+            instrument_currency = extract_position_currency(position)
+            quantity = float_value(position.get("quantity"))
+            average_price = float_value(position.get("averagePricePaid"))
+            current_price = float_value(position.get("currentPrice"))
+            wallet = position.get("walletImpact", {}) or {}
+            cost = float_value(wallet.get("totalCost"))
+            value = float_value(wallet.get("currentValue"))
+            pnl = float_value(wallet.get("unrealizedProfitLoss"))
+            return_pct = (pnl / cost * 100) if cost else 0.0
+            weight_pct = (value / isa_total * 100) if isa_total else 0.0
+
+            isa_rows.append(
+                {
+                    "Ticker": ticker,
+                    "Company": company,
+                    "Currency": instrument_currency,
+                    "Quantity": round(quantity, 6),
+                    "Average Price": round(average_price, 2),
+                    "Current Price": round(current_price, 2),
+                    "Cost (£)": round(cost, 2),
+                    "Value (£)": round(value, 2),
+                    "P/L (£)": round(pnl, 2),
+                    "Return %": round(return_pct, 2),
+                    "Weight %": round(weight_pct, 2),
+                }
+            )
+
+        if isa_rows:
+            st.markdown(
+                '<span class="sf-live-pill">● REAL ISA HOLDINGS</span>',
+                unsafe_allow_html=True,
+            )
+
+            for position in isa_positions:
+                render_holding_card(
+                    position,
+                    portfolio_total=isa_total,
+                    currency_symbol=isa_symbol,
+                )
+
+            with st.expander("View detailed holdings table"):
+                isa_holdings_df = add_logo_column(
+                    pd.DataFrame(isa_rows),
+                    "Ticker",
+                )
+                st.dataframe(
+                    isa_holdings_df,
+                    width='stretch',
+                    hide_index=True,
+                    column_config=LOGO_COLUMN_CONFIG,
+                )
+
+            st.markdown(
+                '<div style="font-size:12pt; margin-top:.45rem;">'
+                'Logos provided by '
+                '<a href="https://parqet.com/api" target="_blank">Parqet</a>'
+                '</div>',
+                unsafe_allow_html=True,
+            )
+        elif isa_positions_error:
+            st.warning(
+                "ISA positions could not be refreshed."
+            )
+        else:
+            st.info("No open Stocks ISA positions.")
+
+        if isa_rows:
+            st.markdown("### Interactive Portfolio Mix")
+
+            mix_df = pd.DataFrame(isa_rows)
+            fig_mix = go.Figure(
+                data=[
+                    go.Pie(
+                        labels=mix_df["Ticker"],
+                        values=mix_df["Value (£)"],
+                        hole=0.66,
+                        textinfo="label+percent",
+                        hovertemplate=(
+                            "<b>%{label}</b><br>"
+                            + isa_symbol
+                            + "%{value:,.2f}<br>"
+                            + "%{percent}<extra></extra>"
+                        ),
+                    )
+                ]
+            )
+
+            fig_mix.update_layout(
+                height=390,
+                margin=dict(l=10, r=10, t=15, b=10),
+                paper_bgcolor="rgba(0,0,0,0)",
+                plot_bgcolor="rgba(0,0,0,0)",
+                showlegend=True,
+                annotations=[
+                    dict(
+                        text=(
+                            f"<b>{isa_symbol}{isa_invested:,.2f}</b>"
+                            "<br><span style='font-size:11px'>INVESTED</span>"
+                        ),
+                        x=0.5,
+                        y=0.5,
+                        font=dict(size=18),
+                        showarrow=False,
+                    )
+                ],
+            )
+
+            st.plotly_chart(
+                fig_mix,
+                width='stretch',
+                config={"displaylogo": False},
+            )
+
+        st.markdown("### Invest with GainZ")
+
+        st.markdown(
+            """
+            <div class="sf-invest-hero">
+                <div class="sf-invest-kicker">✦ GainZ Allocation Engine</div>
+                <div class="sf-invest-title">How much do you want to invest?</div>
+                <div class="sf-invest-copy">
+                    You choose the amount. GainZ chooses the portfolio.
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        isa_invest_amount = st.number_input(
+            "Investment amount (£)",
+            min_value=0.0,
+            value=0.0,
+            step=50.0,
+            format="%.2f",
+            key="isa_gainz_invest_amount",
+        )
+
+        quick1, quick2, quick3, quick4 = st.columns(4)
+
+        if quick1.button("£100", key="isa_quick_100", width='stretch'):
+            st.session_state["isa_gainz_invest_amount"] = 100.0
+            st.rerun()
+
+        if quick2.button("£250", key="isa_quick_250", width='stretch'):
+            st.session_state["isa_gainz_invest_amount"] = 250.0
+            st.rerun()
+
+        if quick3.button("£500", key="isa_quick_500", width='stretch'):
+            st.session_state["isa_gainz_invest_amount"] = 500.0
+            st.rerun()
+
+        if quick4.button("MAX CASH", key="isa_quick_max", width='stretch'):
+            st.session_state["isa_gainz_invest_amount"] = float(isa_cash)
+            st.rerun()
+
+        st.markdown(
+            '<div class="sf-invest-note">'
+            'No ticker selection required • GainZ uses the existing strategy '
+            'to determine the target portfolio'
+            '</div>',
+            unsafe_allow_html=True,
+        )
+
+        st.markdown("")
+
+        if st.button(
+            "✦ BUILD MY PORTFOLIO",
+            key="isa_build_gainz_portfolio",
+            width='stretch',
+            type="primary",
+        ):
+            if isa_invest_amount <= 0:
+                st.error("Enter an investment amount greater than £0.")
+            elif isa_invest_amount > isa_cash:
+                st.error(
+                    f"That amount is above the ISA cash currently available "
+                    f"({isa_symbol}{isa_cash:,.2f})."
+                )
+            elif not weights:
+                st.error(
+                    "GainZ does not currently have a target portfolio available. "
+                    "Run the strategy first, then return to this page."
+                )
+            else:
+                positive_weights = {
+                    str(symbol).upper(): float_value(weight)
+                    for symbol, weight in weights.items()
+                    if float_value(weight) > 0
+                }
+
+                total_target_weight = sum(positive_weights.values())
+
+                if total_target_weight <= 0:
+                    st.error(
+                        "GainZ returned no positive target allocations."
+                    )
+                else:
+                    allocation_rows = []
+
+                    for symbol, target_weight in sorted(
+                        positive_weights.items(),
+                        key=lambda item: item[1],
+                        reverse=True,
+                    ):
+                        normalized_weight = (
+                            target_weight / total_target_weight
+                        )
+                        allocation_amount = (
+                            float(isa_invest_amount)
+                            * normalized_weight
+                        )
+
+                        allocation_rows.append(
+                            {
+                                "Ticker": symbol,
+                                "GainZ Weight": normalized_weight,
+                                "Amount": allocation_amount,
+                            }
+                        )
+
+                    st.session_state["isa_gainz_preview"] = {
+                        "amount": float(isa_invest_amount),
+                        "allocations": allocation_rows,
+                    }
+
+        gainz_preview = st.session_state.get("isa_gainz_preview")
+
+        if gainz_preview:
+            st.markdown("### GainZ Investment Preview")
+            st.caption(
+                "Preview only — these are proposed allocations. "
+                "No real-money order is submitted from this screen."
+            )
+
+            preview_amount = float(gainz_preview["amount"])
+            preview_rows = gainz_preview["allocations"]
+
+            g1, g2, g3 = st.columns(3)
+            g1.metric(
+                "Investment",
+                f"{isa_symbol}{preview_amount:,.2f}",
+            )
+            g2.metric(
+                "Selected by GainZ",
+                len(preview_rows),
+            )
+            g3.metric(
+                "Cash After Preview",
+                f"{isa_symbol}{max(isa_cash - preview_amount, 0):,.2f}",
+            )
+
+            preview_df = pd.DataFrame(preview_rows)
+            preview_df["Allocation"] = preview_df["GainZ Weight"].map(
+                lambda value: f"{value * 100:.1f}%"
+            )
+            preview_df["Amount (£)"] = preview_df["Amount"].map(
+                lambda value: f"£{value:,.2f}"
+            )
+
+            isa_preview_display = preview_df[
+                ["Ticker", "Allocation", "Amount (£)"]
+            ].copy()
+            isa_preview_display = add_logo_column(
+                isa_preview_display,
+                "Ticker",
             )
 
             st.dataframe(
-                result_df,
-                use_container_width=True,
+                isa_preview_display,
                 hide_index=True,
+                width='stretch',
+                column_config=LOGO_COLUMN_CONFIG,
             )
 
+            preview_df_chart = preview_df.copy()
+            fig_preview = go.Figure(
+                data=[
+                    go.Pie(
+                        labels=preview_df_chart["Ticker"],
+                        values=preview_df_chart["Amount"],
+                        hole=0.68,
+                        textinfo="label+percent",
+                        hovertemplate=(
+                            "<b>%{label}</b><br>"
+                            "£%{value:,.2f}<br>"
+                            "%{percent}<extra></extra>"
+                        ),
+                    )
+                ]
+            )
+            fig_preview.update_layout(
+                height=400,
+                margin=dict(l=10, r=10, t=15, b=10),
+                paper_bgcolor="rgba(0,0,0,0)",
+                plot_bgcolor="rgba(0,0,0,0)",
+                annotations=[
+                    dict(
+                        text=(
+                            f"<b>{isa_symbol}{preview_amount:,.2f}</b>"
+                            "<br><span style='font-size:11px'>GAINZ PLAN</span>"
+                        ),
+                        x=0.5,
+                        y=0.5,
+                        showarrow=False,
+                        font=dict(size=18),
+                    )
+                ],
+            )
 
-            failed = result_df[
-                result_df["status"]
-                .str.upper()
-                .isin(
-                    [
-                        "REJECTED",
-                        "FAILED",
-                        "ERROR",
-                    ]
-                )
-            ]
+            st.plotly_chart(
+                fig_preview,
+                width='stretch',
+                config={"displaylogo": False},
+            )
 
+            st.warning(
+                "🔒 REAL EXECUTION LOCKED — this preview does not place "
+                "any Stocks ISA orders."
+            )
 
-            if failed.empty:
+        st.markdown("### ISA Safety State")
 
-                st.success(
-                    f"All available Practice sell orders were submitted. "
-                    f"Approximately "
-                    f"{currency_symbol}{portfolio_profit_for_exit:,.2f} "
-                    f"of current unrealised P/L was available to be realised "
-                    f"before execution."
-                )
-
-                st.info(
-                    "GainZ dashboard pause has been enabled."
-                )
-
-            else:
-
-                st.error(
-                    "At least one sell did not submit successfully. "
-                    "Do not retry blindly. Review the result table "
-                    "and Trading 212 orders first."
-                )
-
-
-            st.cache_data.clear()
-
-
-if nav_page == "Dashboard":
-    # ============================================================
-    # CONTROLS
-    # ============================================================
-
-    st.divider()
-
-    st.subheader("SF Alpha Actions")
-
-    b1, b2, b3 = st.columns(3)
-
-
-    with b1:
-
-        if st.button(
-            "🔄 Refresh Broker Data",
-            use_container_width=True,
-        ):
-
-            st.cache_data.clear()
-            st.rerun()
-
-
-    with b2:
-
-        if st.button(
-            "🧠 Generate Plan",
-            use_container_width=True,
-            disabled=(
-                preview_mode
-                or not credentials_present()
-            ),
-        ):
-
-            with st.spinner(
-                "Generating GainZ plan..."
-            ):
-
-                result = run_gainz(
-                    execute_demo=False
-                )
-
-            if result["success"]:
-
-                st.success(
-                    "GainZ plan generated."
-                )
-
-            else:
-
-                st.error(
-                    result["stderr"]
-                    or "Plan generation failed."
-                )
-
-
-    with b3:
-
-        practice_confirm = st.checkbox(
-            "I confirm this is Practice money",
-            disabled=preview_mode,
+        isa_trading_unlocked = (
+            os.getenv("GAINZ_ENABLE_ISA_TRADING") == "YES"
         )
 
-        execute_disabled = (
-            preview_mode
-            or not credentials_present()
-            or not practice_confirm
-            or pending_count > 0
+        safety_rows = [
+            {
+                "Check": "ISA API connection",
+                "Status": (
+                    "CONNECTED"
+                    if not isa_account_error
+                    else "CHECK"
+                ),
+            },
+            {
+                "Check": "Positions feed",
+                "Status": (
+                    "CONNECTED"
+                    if not isa_positions_error
+                    else "CHECK"
+                ),
+            },
+            {
+                "Check": "Pending orders",
+                "Status": (
+                    f"{len(isa_orders)} pending"
+                    if isa_orders
+                    else "CLEAR"
+                ),
+            },
+            {
+                "Check": "Dashboard order submission",
+                "Status": "DISABLED",
+            },
+            {
+                "Check": "Broker ISA execution lock",
+                "Status": (
+                    "UNLOCKED"
+                    if isa_trading_unlocked
+                    else "LOCKED"
+                ),
+            },
+        ]
+
+        st.dataframe(
+            pd.DataFrame(safety_rows),
+            hide_index=True,
+            width="stretch",
         )
 
-        if st.button(
-            "🧪 Execute Practice",
-            type="primary",
-            use_container_width=True,
-            disabled=execute_disabled,
-        ):
-
-            with st.spinner(
-                "Submitting Practice orders..."
-            ):
-
-                result = run_gainz(
-                    execute_demo=True
-                )
-
-            st.cache_data.clear()
-
-            if result["success"]:
-
-                st.success(
-                    "Practice orders submitted."
-                )
-
-            else:
-
-                st.error(
-                    result["stderr"]
-                    or "Practice execution failed."
-                )
-
-
-    if preview_mode:
-
-        st.info(
-            "Trading controls are disabled in Preview mode."
-        )
-
-    elif pending_count > 0:
-
-        st.warning(
-            "Practice execution is disabled while broker "
-            "orders are pending."
-        )
-
+        if isa_trading_unlocked:
+            st.error(
+                "GAINZ_ENABLE_ISA_TRADING=YES is currently set. "
+                "Remove it while the ISA dashboard is still in "
+                "preview-only development."
+            )
+        else:
+            st.success(
+                "Real-money order submission remains locked."
+            )
 
 
 if nav_page == "System":

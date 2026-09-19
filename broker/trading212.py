@@ -1,9 +1,8 @@
 """Minimal Trading 212 Public API adapter.
 
-Live trading is deliberately locked unless BOTH:
-- environment='live' is explicitly requested
-- GAINZ_ENABLE_LIVE=YES is set
-
+Supports demo, live, and Stocks & Shares ISA access.
+ISA uses separate credentials. Real-money ISA order submission is locked unless
+GAINZ_ENABLE_ISA_TRADING=YES is explicitly set.
 Credentials are read from environment variables.
 """
 
@@ -26,6 +25,7 @@ class Trading212Broker:
     BASES = {
         "demo": "https://demo.trading212.com/api/v0",
         "live": "https://live.trading212.com/api/v0",
+        "isa": "https://live.trading212.com/api/v0",
     }
 
     def __init__(
@@ -36,12 +36,28 @@ class Trading212Broker:
     ):
         if environment not in self.BASES:
             raise ValueError(
-                "environment must be 'demo' or 'live'"
+                "environment must be 'demo', 'live', or 'isa'"
             )
 
-        # -----------------------------------------------------
-        # LIVE SAFETY LOCK
-        # -----------------------------------------------------
+        self.environment = environment
+        self.base = self.BASES[environment]
+
+        if environment == "isa":
+            default_api_key = os.getenv("TRADING212_ISA_API_KEY")
+            default_api_secret = os.getenv("TRADING212_ISA_API_SECRET")
+            credential_name = "ISA"
+        else:
+            default_api_key = os.getenv("TRADING212_API_KEY")
+            default_api_secret = os.getenv("TRADING212_API_SECRET")
+            credential_name = environment.upper()
+
+        self.api_key = api_key or default_api_key
+        self.api_secret = api_secret or default_api_secret
+
+        if not self.api_key or not self.api_secret:
+            raise Trading212Error(
+                f"Missing Trading 212 {credential_name} API credentials."
+            )
 
         if (
             environment == "live"
@@ -49,26 +65,7 @@ class Trading212Broker:
         ):
             raise Trading212Error(
                 "LIVE trading is locked. "
-                "Set GAINZ_ENABLE_LIVE=YES only after demo validation."
-            )
-
-        self.environment = environment
-        self.base = self.BASES[environment]
-
-        self.api_key = (
-            api_key
-            or os.getenv("TRADING212_API_KEY")
-        )
-
-        self.api_secret = (
-            api_secret
-            or os.getenv("TRADING212_API_SECRET")
-        )
-
-        if not self.api_key or not self.api_secret:
-            raise Trading212Error(
-                "Missing TRADING212_API_KEY/"
-                "TRADING212_API_SECRET"
+                "Set GAINZ_ENABLE_LIVE=YES only after validation."
             )
 
         self._instrument_map = None
@@ -482,6 +479,17 @@ class Trading212Broker:
         quantity: float,
     ) -> OrderResult:
 
+        if (
+            self.environment == "isa"
+            and os.getenv("GAINZ_ENABLE_ISA_TRADING") != "YES"
+        ):
+            raise Trading212Error(
+                "ISA order submission is locked. "
+                "Set GAINZ_ENABLE_ISA_TRADING=YES only after "
+                "the real-money dashboard and confirmation flow "
+                "have been validated."
+            )
+
         ticker = self.broker_ticker(
             symbol
         )
@@ -549,7 +557,7 @@ class Trading212Broker:
                     status="SUBMITTED",
                     order_id=order_id,
                     message=(
-                        "Trading 212 DEMO "
+                        f"Trading 212 {self.environment.upper()} "
                         "market order submitted "
                         f"with precision={precision}"
                     ),
