@@ -9,6 +9,9 @@ Examples:
       # sends DEMO orders
       # Telegram signals are sent
 
+  python run_trading212.py --investment-amount 500
+      # Practice-only new-cash GainZ preview
+
 Live mode is intentionally not exposed as a CLI switch.
 """
 
@@ -23,9 +26,13 @@ from dotenv import load_dotenv
 from config.settings import load_settings
 from live.signal import adaptive_target
 from broker.trading212 import Trading212Broker
-from execution.planner import build_rebalance_orders
+from execution.planner import PlannedOrder, build_rebalance_orders
 from execution.engine import execute_orders
 from notifications.telegram import send_telegram_message
+from portfolio.realized_pnl import (
+    calculate_realized_pnl,
+    get_today_realized_pnl,
+)
 
 
 ROOT = Path(__file__).resolve().parent
@@ -33,6 +40,14 @@ ROOT = Path(__file__).resolve().parent
 load_dotenv(ROOT / ".env")
 
 SETTINGS = load_settings()
+
+MAX_POSITION_WEIGHT = 0.15
+MAX_ORDER_WEIGHT = 0.10
+MAX_EXPOSURE_WEIGHT = 0.90
+
+# Engineering safety threshold for testing.
+# This is configurable and is not an investment recommendation.
+MAX_DAILY_LOSS_WEIGHT = 0.02
 
 
 # ============================================================
@@ -69,22 +84,8 @@ def load_prices(ticker):
 
 def get_usd_to_gbp_rate() -> float:
     """
-    Get a recent GBP/USD market rate from Yahoo Finance.
-
-    Yahoo ticker:
-        GBPUSD=X
-
-    Example:
-        GBPUSD = 1.35
-
-    Means:
-        £1 = $1.35
-
-    Therefore:
-        $1 = £(1 / 1.35)
-
-    Returns:
-        USD -> GBP conversion rate.
+    Get a recent GBP/USD market rate from Yahoo Finance and convert
+    it to USD -> GBP.
     """
 
     fx = yf.download(
@@ -136,10 +137,9 @@ def send_order_plan_to_telegram(
     execute_demo: bool,
 ):
     """
-    Send the GainZ rebalance plan to Telegram.
+    Send the GainZ order plan to Telegram.
 
-    Notification only.
-    This function never executes trades.
+    Notification only. This function never executes trades.
     """
 
     if not orders:
@@ -167,7 +167,6 @@ def send_order_plan_to_telegram(
     buys = []
 
     for order in orders:
-
         quantity = float(
             getattr(order, "quantity", 0.0)
         )
@@ -233,6 +232,73 @@ def send_order_plan_to_telegram(
 
 
 # ============================================================
+# NEW-CASH BUY-ONLY PLAN
+# ============================================================
+
+def build_new_cash_orders(
+    weights: dict,
+    deployment_cash: float,
+    prices: dict,
+    usd_to_gbp: float,
+) -> list[PlannedOrder]:
+    """
+    Deploy only the requested new cash using the raw GainZ target
+    weights.
+
+    Existing holdings are not sold or rebalanced in this mode.
+    Raw weights are deliberately not normalised to 100%, so GainZ's
+    intended residual cash allocation is preserved.
+    """
+
+    orders: list[PlannedOrder] = []
+
+    for symbol, target_weight in sorted(
+        weights.items(),
+        key=lambda item: item[0],
+    ):
+        target_weight = float(
+            target_weight or 0.0
+        )
+
+        if target_weight <= 0:
+            continue
+
+        price_usd = float(
+            prices.get(symbol, 0.0) or 0.0
+        )
+
+        if price_usd <= 0:
+            continue
+
+        price_gbp = price_usd * usd_to_gbp
+
+        if price_gbp <= 0:
+            continue
+
+        allocation_gbp = (
+            float(deployment_cash)
+            * target_weight
+        )
+
+        if allocation_gbp < 1.0:
+            continue
+
+        quantity = allocation_gbp / price_gbp
+
+        orders.append(
+            PlannedOrder(
+                symbol=symbol,
+                side="BUY",
+                quantity=quantity,
+                reference_price=price_gbp,
+                estimated_value=allocation_gbp,
+            )
+        )
+
+    return orders
+
+
+# ============================================================
 # MAIN
 # ============================================================
 
@@ -246,7 +312,25 @@ def main():
         help="Actually submit orders to Trading 212 DEMO",
     )
 
+    parser.add_argument(
+        "--investment-amount",
+        type=float,
+        default=None,
+        help=(
+            "Optional GBP amount to deploy using GainZ target weights. "
+            "When omitted, the existing full-portfolio rebalance is used."
+        ),
+    )
+
     args = parser.parse_args()
+
+    if (
+        args.investment_amount is not None
+        and args.investment_amount <= 0
+    ):
+        parser.error(
+            "--investment-amount must be greater than zero"
+        )
 
     # --------------------------------------------------------
     # GainZ universe
@@ -312,7 +396,6 @@ def main():
     )
 
     account = broker.account_summary()
-
     positions = broker.positions()
 
     # --------------------------------------------------------
@@ -325,39 +408,74 @@ def main():
     )
 
     if isinstance(cash_data, dict):
-
         cash = float(
             cash_data.get(
                 "availableToTrade",
                 0.0,
             )
         )
-
     else:
-
         cash = float(
             cash_data or 0.0
         )
 
     # --------------------------------------------------------
-    # Build GainZ rebalance
+    # Build GainZ plan
     # --------------------------------------------------------
 
-    orders = build_rebalance_orders(
-        target_weights=weights,
-        positions=positions,
-        cash=cash,
-        prices=prices,
-        min_order_value=1.0,
-        usd_to_gbp=usd_to_gbp,
-    )
+    deployment_cash = cash
+
+    if args.investment_amount is not None:
+        if args.investment_amount > cash:
+            raise RuntimeError(
+                f"Requested Practice investment "
+                f"£{args.investment_amount:.2f} exceeds "
+                f"available cash £{cash:.2f}."
+            )
+
+        deployment_cash = float(
+            args.investment_amount
+        )
+
+        print(
+            f"GainZ Practice deployment amount: "
+            f"£{deployment_cash:.2f}"
+        )
+
+    if args.investment_amount is None:
+        # Normal mode: whole Practice portfolio rebalance.
+        orders = build_rebalance_orders(
+            target_weights=weights,
+            positions=positions,
+            cash=deployment_cash,
+            prices=prices,
+            min_order_value=1.0,
+            usd_to_gbp=usd_to_gbp,
+        )
+
+    else:
+        # New-cash mode: BUY only. No existing position is sold.
+        orders = build_new_cash_orders(
+            weights=weights,
+            deployment_cash=deployment_cash,
+            prices=prices,
+            usd_to_gbp=usd_to_gbp,
+        )
+
+        planned_deployment = sum(
+            float(order.estimated_value)
+            for order in orders
+        )
+
+        print(
+            f"GainZ new-cash mode: {len(orders)} BUY orders, "
+            f"planned deployment £{planned_deployment:.2f}, "
+            f"cash reserve "
+            f"£{deployment_cash - planned_deployment:.2f}"
+        )
 
     # --------------------------------------------------------
     # TELEGRAM
-    #
-    # IMPORTANT:
-    # Telegram receives the PLAN.
-    # It does not execute anything.
     # --------------------------------------------------------
 
     send_order_plan_to_telegram(
@@ -366,19 +484,53 @@ def main():
     )
 
     # --------------------------------------------------------
-    # Execute
-    #
-    # WITHOUT --execute-demo:
-    #     DRY RUN ONLY
-    #
-    # WITH --execute-demo:
-    #     Trading 212 Practice orders
+    # Risk-engine inputs
+    # --------------------------------------------------------
+
+    pending_orders = broker.orders()
+
+    invested_value = sum(
+        float(position.market_value)
+        for position in positions
+    )
+
+    # Do not add deployment_cash here. It is already part of cash.
+    equity = float(cash) + invested_value
+
+    # Broker history is now a mandatory risk input.
+    # If this request fails, the runner fails closed before execution.
+    historical_orders = broker.historical_orders()
+
+    realized_analysis = calculate_realized_pnl(
+        historical_orders
+    )
+
+    today_realized_pnl = get_today_realized_pnl(
+        realized_analysis
+    )
+
+    print(
+        f"Risk engine: equity=£{equity:.2f}, "
+        f"pending_orders={len(pending_orders)}, "
+        f"today_realised_pnl=£{today_realized_pnl:.2f}"
+    )
+
+    # --------------------------------------------------------
+    # Execute / dry-run through ALL safeguards
     # --------------------------------------------------------
 
     results = execute_orders(
-        broker,
-        orders,
+        broker=broker,
+        orders=orders,
         dry_run=not args.execute_demo,
+        positions=positions,
+        equity=equity,
+        pending_orders=pending_orders,
+        max_position_weight=MAX_POSITION_WEIGHT,
+        max_order_weight=MAX_ORDER_WEIGHT,
+        max_exposure_weight=MAX_EXPOSURE_WEIGHT,
+        today_realized_pnl=today_realized_pnl,
+        max_daily_loss_weight=MAX_DAILY_LOSS_WEIGHT,
     )
 
     # --------------------------------------------------------
@@ -397,6 +549,39 @@ def main():
         "target_weights": weights,
 
         "cash_available_gbp": cash,
+
+        "requested_investment_amount_gbp": (
+            float(args.investment_amount)
+            if args.investment_amount is not None
+            else None
+        ),
+
+        "deployment_cash_gbp": deployment_cash,
+
+        "portfolio_equity_gbp": equity,
+
+        "today_realized_pnl_gbp": (
+            today_realized_pnl
+        ),
+
+        "pending_order_count": len(
+            pending_orders
+        ),
+
+        "risk_limits": {
+            "max_position_weight": (
+                MAX_POSITION_WEIGHT
+            ),
+            "max_order_weight": (
+                MAX_ORDER_WEIGHT
+            ),
+            "max_exposure_weight": (
+                MAX_EXPOSURE_WEIGHT
+            ),
+            "max_daily_loss_weight": (
+                MAX_DAILY_LOSS_WEIGHT
+            ),
+        },
 
         "usd_to_gbp": usd_to_gbp,
 
