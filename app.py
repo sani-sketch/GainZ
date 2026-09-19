@@ -4243,33 +4243,16 @@ if nav_page == "Stocks ISA":
                 st.error("Enter an investment amount greater than £0.")
 
             elif isa_invest_amount > isa_cash:
-                @st.dialog("Not Enough Cash")
-                def show_isa_insufficient_cash_dialog():
-                    shortfall = max(
-                        float(isa_invest_amount) - float(isa_cash),
-                        0.0,
-                    )
-
-                    st.markdown(
-                        f"""
-                        You entered **{isa_symbol}{isa_invest_amount:,.2f}**, but
-                        only **{isa_symbol}{isa_cash:,.2f}** is currently
-                        available as cash in your Stocks ISA.
-
-                        **Additional cash needed:**
-                        {isa_symbol}{shortfall:,.2f}
-                        """
-                    )
-
-                    if st.button(
-                        "OK",
-                        key="isa_insufficient_cash_ok",
-                        width="stretch",
-                        type="primary",
-                    ):
-                        st.rerun()
-
-                show_isa_insufficient_cash_dialog()
+                shortfall = max(
+                    float(isa_invest_amount) - float(isa_cash),
+                    0.0,
+                )
+                st.warning(
+                    f"Not enough ISA cash. You entered "
+                    f"{isa_symbol}{isa_invest_amount:,.2f}, but only "
+                    f"{isa_symbol}{isa_cash:,.2f} is currently available. "
+                    f"Additional cash needed: {isa_symbol}{shortfall:,.2f}."
+                )
 
             elif not weights:
                 st.error(
