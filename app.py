@@ -4384,17 +4384,24 @@ if nav_page == "Stocks ISA":
                     column_config=LOGO_COLUMN_CONFIG,
                 )
 
-            if not all_approved:
-                st.error(
-                    "One or more proposed ISA BUY orders did not pass the "
-                    "risk engine. Real-money confirmation is disabled."
-                )
+            blocked_order_count = max(
+                len(preview_orders) - len(frozen_orders),
+                0,
+            )
 
-            elif frozen_orders:
-                st.success(
-                    "All proposed ISA BUY orders passed the current "
-                    "execution risk checks."
-                )
+            if frozen_orders:
+                if blocked_order_count:
+                    st.warning(
+                        f"{len(frozen_orders)} of {len(preview_orders)} proposed "
+                        f"ISA BUY orders passed the risk engine. "
+                        f"{blocked_order_count} blocked order(s) will be excluded "
+                        "from real-money execution."
+                    )
+                else:
+                    st.success(
+                        "All proposed ISA BUY orders passed the current "
+                        "execution risk checks."
+                    )
 
                 @st.dialog("Confirm ISA Investment")
                 def show_isa_buy_confirmation():
@@ -4403,13 +4410,17 @@ if nav_page == "Stocks ISA":
                         You are about to submit **{len(frozen_orders)} real-money
                         BUY order(s)** to your Trading 212 Stocks ISA.
 
-                        **Investment amount:** {isa_symbol}{preview_amount:,.2f}
+                        **Capital assigned:** {isa_symbol}{preview_amount:,.2f}
 
-                        **Estimated stock deployment:**
+                        **Risk-approved stock deployment:**
                         {isa_symbol}{planned_stock_value:,.2f}
 
-                        The exact share quantities shown in the preview are
-                        frozen. Market execution prices can still differ.
+                        **Excluded by risk controls:** {blocked_order_count} order(s)
+
+                        Only the risk-approved frozen orders will be submitted.
+                        Blocked orders will not be sent to Trading 212. The exact
+                        approved share quantities shown in the preview are frozen.
+                        Market execution prices can still differ.
                         """
                     )
 
@@ -4514,6 +4525,12 @@ if nav_page == "Stocks ISA":
                     type="primary",
                 ):
                     show_isa_buy_confirmation()
+
+            elif preview_orders:
+                st.error(
+                    "None of the proposed ISA BUY orders passed the current "
+                    "risk checks, so there is nothing available to confirm."
+                )
 
         st.markdown("### ISA Safety State")
 
