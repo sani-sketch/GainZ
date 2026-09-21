@@ -571,40 +571,105 @@ class Trading212Broker:
         # -----------------------------------------------------
         # LIVE / ISA
         # -----------------------------------------------------
-        # Real-money environments submit the requested quantity
-        # exactly once. Do not apply the DEMO precision fallback
-        # and do not blindly retry POST requests.
+        # BUY orders: Trading 212 rejects quantities whose decimal
+        # precision is too high. For real-money BUYs we therefore
+        # try progressively lower precision ONLY after the broker
+        # has explicitly rejected the previous request with the
+        # quantity-precision-mismatch error. A rejected HTTP 400
+        # precision request is not an accepted order, so this is not
+        # a blind POST retry.
         #
-        # This is especially important for full-position ISA
-        # liquidation, where rounding the position quantity could
-        # leave a residual holding.
+        # SELL orders deliberately keep the exact requested quantity
+        # and are submitted only once. This preserves the existing
+        # full-position liquidation safety: GainZ must never silently
+        # round a SELL and leave an unintended residual holding.
         if self.environment in {"live", "isa"}:
-            payload = {
-                "ticker": ticker,
-                "quantity": original_quantity,
-            }
 
-            raw = self._request(
-                "POST",
-                "/equity/orders/market",
-                payload,
-            )
+            if original_quantity < 0:
+                payload = {
+                    "ticker": ticker,
+                    "quantity": original_quantity,
+                }
 
-            order_id = None
+                raw = self._request(
+                    "POST",
+                    "/equity/orders/market",
+                    payload,
+                )
 
-            if isinstance(raw, dict):
-                if raw.get("id") is not None:
-                    order_id = str(raw.get("id"))
+                order_id = None
 
-            return OrderResult(
-                symbol=symbol,
-                quantity=original_quantity,
-                status="SUBMITTED",
-                order_id=order_id,
-                message=(
-                    f"Trading 212 {self.environment.upper()} "
-                    "market order submitted with exact requested quantity."
-                ),
+                if isinstance(raw, dict):
+                    if raw.get("id") is not None:
+                        order_id = str(raw.get("id"))
+
+                return OrderResult(
+                    symbol=symbol,
+                    quantity=original_quantity,
+                    status="SUBMITTED",
+                    order_id=order_id,
+                    message=(
+                        f"Trading 212 {self.environment.upper()} "
+                        "SELL submitted with exact requested quantity."
+                    ),
+                )
+
+            precisions = [4, 3, 2, 1, 0]
+            last_error = None
+
+            for precision in precisions:
+                rounded_quantity = round(
+                    original_quantity,
+                    precision,
+                )
+
+                if rounded_quantity <= 0:
+                    continue
+
+                payload = {
+                    "ticker": ticker,
+                    "quantity": rounded_quantity,
+                }
+
+                try:
+                    raw = self._request(
+                        "POST",
+                        "/equity/orders/market",
+                        payload,
+                    )
+
+                    order_id = None
+
+                    if isinstance(raw, dict):
+                        if raw.get("id") is not None:
+                            order_id = str(raw.get("id"))
+
+                    return OrderResult(
+                        symbol=symbol,
+                        quantity=rounded_quantity,
+                        status="SUBMITTED",
+                        order_id=order_id,
+                        message=(
+                            f"Trading 212 {self.environment.upper()} "
+                            "BUY submitted "
+                            f"with quantity precision={precision}."
+                        ),
+                    )
+
+                except Trading212Error as exc:
+                    last_error = exc
+                    error_text = str(exc)
+
+                    if (
+                        "quantity-precision-mismatch"
+                        not in error_text
+                    ):
+                        raise
+
+            raise Trading212Error(
+                f"Could not submit {symbol}. "
+                "Trading 212 rejected all supported BUY quantity "
+                f"precisions. Last error: {last_error}"
             )
 
         # -----------------------------------------------------
