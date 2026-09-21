@@ -4254,21 +4254,47 @@ if nav_page == "Stocks ISA":
                     f"Additional cash needed: {isa_symbol}{shortfall:,.2f}."
                 )
 
-            elif not weights:
-                st.error(
-                    "GainZ does not currently have a target portfolio available. "
-                    "Run the strategy first, then return to this page."
-                )
-
             else:
                 try:
+                    build_weights = weights
+
+                    if not build_weights:
+                        with st.spinner(
+                            "Running GainZ and calculating the current target portfolio..."
+                        ):
+                            strategy_result = run_gainz(
+                                execute_demo=False,
+                            )
+
+                        if not strategy_result.get("success"):
+                            details = (
+                                strategy_result.get("stderr")
+                                or strategy_result.get("stdout")
+                                or "GainZ strategy run failed."
+                            )
+                            raise RuntimeError(
+                                "GainZ could not calculate the current target portfolio. "
+                                + str(details).strip()
+                            )
+
+                        fresh_report = load_report()
+                        build_weights = fresh_report.get(
+                            "target_weights",
+                            {},
+                        ) or {}
+
+                        if not build_weights:
+                            raise RuntimeError(
+                                "GainZ completed but produced no positive target portfolio."
+                            )
+
                     with st.spinner(
                         "Building and risk-checking the exact ISA portfolio..."
                     ):
                         st.session_state["isa_gainz_preview"] = (
                             build_isa_gainz_preview(
                                 isa_invest_amount,
-                                weights,
+                                build_weights,
                             )
                         )
                     st.rerun()
